@@ -1491,6 +1491,15 @@ class DJMakerUI:
                 else ft.Colors.SURFACE_CONTAINER_HIGHEST
             ),
             alignment=ft.Alignment.CENTER,
+            animate=ft.Animation(
+                duration=120,
+                curve=ft.AnimationCurve.EASE_OUT_CUBIC,
+            ),
+            on_hover=(
+                DJMakerUI._on_accent_track_tag_hover
+                if accent
+                else DJMakerUI._on_neutral_track_tag_hover
+            ),
             content=ft.Text(
                 label,
                 size=COMPACT_UI.font_micro,
@@ -1502,6 +1511,38 @@ class DJMakerUI:
                 max_lines=1,
             ),
         )
+
+    @staticmethod
+    def _on_accent_track_tag_hover(event: ft.Event[ft.Container]) -> None:
+        """Усиливает акцентный тег при наведении без обновления строки."""
+        hovered = bool(event.data)
+        event.control.bgcolor = (
+            ft.Colors.PRIMARY if hovered else ft.Colors.PRIMARY_CONTAINER
+        )
+        if isinstance(event.control.content, ft.Text):
+            event.control.content.color = (
+                ft.Colors.ON_PRIMARY
+                if hovered
+                else ft.Colors.ON_PRIMARY_CONTAINER
+            )
+        event.control.update()
+
+    @staticmethod
+    def _on_neutral_track_tag_hover(event: ft.Event[ft.Container]) -> None:
+        """Подсвечивает технический тег цветами активной темы."""
+        hovered = bool(event.data)
+        event.control.bgcolor = (
+            ft.Colors.PRIMARY_CONTAINER
+            if hovered
+            else ft.Colors.SURFACE_CONTAINER_HIGHEST
+        )
+        if isinstance(event.control.content, ft.Text):
+            event.control.content.color = (
+                ft.Colors.ON_PRIMARY_CONTAINER
+                if hovered
+                else ft.Colors.ON_SURFACE_VARIANT
+            )
+        event.control.update()
 
     @staticmethod
     def _track_bpm_label(track: TrackRecord) -> str:

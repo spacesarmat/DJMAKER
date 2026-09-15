@@ -33,6 +33,19 @@ class TrackRowUITests(unittest.TestCase):
         self.assertIn('tags.append(f"{round(technical.bitrate / 1000)} kbps")', source)
         self.assertIn('tags.append(f"{technical.sample_rate / 1000:g} kHz")', source)
 
+
+    def test_track_tags_highlight_on_hover(self) -> None:
+        source = UI_SOURCE.read_text(encoding="utf-8")
+
+        self.assertIn("on_hover=(", source)
+        self.assertIn("DJMakerUI._on_accent_track_tag_hover", source)
+        self.assertIn("DJMakerUI._on_neutral_track_tag_hover", source)
+        self.assertIn("ft.Colors.PRIMARY if hovered", source)
+        self.assertIn("ft.Colors.PRIMARY_CONTAINER", source)
+        self.assertIn("event.control.update()", source)
+        self.assertIn("duration=120", source)
+        self.assertIn("ft.AnimationCurve.EASE_OUT_CUBIC", source)
+
     def test_third_line_double_click_reveals_file(self) -> None:
         source = UI_SOURCE.read_text(encoding="utf-8")
 
