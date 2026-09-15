@@ -13,7 +13,15 @@ from typing import Any
 LOGGER = logging.getLogger(__name__)
 
 THEME_MODES = ("system", "light", "dark")
-THEME_PALETTES = ("djmaker_blue", "violet", "emerald", "amber", "graphite")
+THEME_PALETTES = (
+    "djmaker_blue",
+    "violet",
+    "emerald",
+    "amber",
+    "graphite",
+    "clean_graphene",
+    "strict",
+)
 DEFAULT_THEME_MODE = "system"
 DEFAULT_THEME_PALETTE = "djmaker_blue"
 

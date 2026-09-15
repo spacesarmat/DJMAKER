@@ -15,7 +15,7 @@ DJMAKER — кроссплатформенная desktop-программа на
 - архитектура онлайн-провайдеров;
 - MusicBrainz как первый провайдер метаданных;
 - системная, светлая и тёмная тема интерфейса с сохранением выбора;
-- цветовые схемы DJMAKER Blue, Violet, Emerald, Amber и Graphite;
+- цветовые схемы DJMAKER Blue, Violet, Emerald, Amber, Graphite, «Чистый графен» и «Строгий»;
 - автоматическая установка FFmpeg и собственного Essentia runtime;
 - пакетный многопоточный BPM / Key / Camelot анализ через FFmpeg → Essentia;
 - встроенные обложки MP3/FLAC/M4A с локальным content-addressed кэшем;

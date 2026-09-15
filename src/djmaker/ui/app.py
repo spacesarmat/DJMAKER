@@ -36,6 +36,7 @@ from djmaker.ui.theme import (
     THEME_MODE_LABELS,
     THEME_PALETTES,
     apply_app_theme,
+    palette_description,
     palette_title,
     theme_mode_icon,
 )
@@ -2166,6 +2167,11 @@ class DJMakerUI:
                     ),
                     mode_dropdown,
                     palette_dropdown,
+                    ft.Text(
+                        palette_description(self.settings.theme_palette),
+                        size=COMPACT_UI.font_xs,
+                        color=ft.Colors.ON_SURFACE_VARIANT,
+                    ),
                 ],
                 spacing=5,
             )
