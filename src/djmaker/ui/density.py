@@ -49,7 +49,7 @@ class UIDensity:
     track_icon_size: int = 16
     action_icon_size: int = 16
     waveform_bar_count: int = 60
-    waveform_bar_width: int = 2
+    waveform_bar_width: int = 5
     waveform_bar_gap: int = 1
     waveform_height: int = 34
     waveform_min_bar_height: int = 3

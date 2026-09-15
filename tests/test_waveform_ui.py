@@ -28,9 +28,23 @@ class WaveformUITests(unittest.TestCase):
         self.assertIn("def _track_waveform", source)
         self.assertIn("on_tap=lambda _, track_id=track.id", source)
         self.assertIn("on_tap_down=lambda event, current=track", source)
-        self.assertIn("vertical_alignment=ft.CrossAxisAlignment.END", source)
+        self.assertIn("def _waveform_svg", source)
+        self.assertIn("ft.Stack(", source)
         self.assertIn("waveform_bar_gap", source)
         self.assertIn("ft.Colors.PRIMARY", source)
+        self.assertNotIn("_waveform_bar_controls", source)
+
+    def test_waveform_is_wider_and_player_updates_are_partial(self) -> None:
+        source = UI_SOURCE.read_text(encoding="utf-8")
+        density = (PROJECT_ROOT / "src" / "djmaker" / "ui" / "density.py").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("waveform_bar_width: int = 5", density)
+        self.assertIn("self.page.update(*controls)", source)
+        self.assertIn("dict[int, _WaveformView]", source)
+        self.assertIn("played == view.played_bars", source)
+        self.assertIn("concurrency = min(1,", source)
 
     def test_track_metadata_is_rendered_in_three_requested_lines(self) -> None:
         source = UI_SOURCE.read_text(encoding="utf-8")

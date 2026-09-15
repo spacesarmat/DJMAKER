@@ -100,6 +100,8 @@ def build_waveform_command(executable: Path, source: Path) -> list[str]:
         "-vn",
         "-sn",
         "-dn",
+        "-threads",
+        "1",
         "-ac",
         "1",
         "-ar",
@@ -116,29 +118,27 @@ def extract_waveform_peaks(
     payload: bytes,
     bar_count: int = WAVEFORM_BAR_COUNT,
 ) -> tuple[float, ...]:
-    """Сворачивает little-endian float32 PCM в логарифмически подсвеченные пики."""
+    """Сворачивает float32 PCM в пики без промежуточного списка сэмплов."""
     if bar_count < 1:
         raise ValueError("bar_count должен быть >= 1")
     usable = len(payload) - (len(payload) % 4)
-    if usable == 0:
+    sample_count = usable // 4
+    if sample_count == 0:
         return tuple(0.0 for _ in range(bar_count))
 
-    samples = [abs(value[0]) for value in struct.iter_unpack("<f", payload[:usable])]
-    if not samples:
-        return tuple(0.0 for _ in range(bar_count))
-
-    peaks: list[float] = []
-    total = len(samples)
-    for index in range(bar_count):
-        start = (index * total) // bar_count
-        stop = ((index + 1) * total) // bar_count
-        if stop <= start:
-            stop = min(total, start + 1)
-        bucket = samples[start:stop]
-        peaks.append(max(bucket, default=0.0))
+    peaks = [0.0] * bar_count
+    for index, (raw_sample,) in enumerate(
+        struct.iter_unpack("<f", payload[:usable])
+    ):
+        sample = abs(raw_sample)
+        if not math.isfinite(sample):
+            continue
+        bucket = min(bar_count - 1, (index * bar_count) // sample_count)
+        if sample > peaks[bucket]:
+            peaks[bucket] = sample
 
     ceiling = max(peaks, default=0.0)
-    if not math.isfinite(ceiling) or ceiling <= 0:
+    if ceiling <= 0:
         return tuple(0.0 for _ in peaks)
 
     normalized = []

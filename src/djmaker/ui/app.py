@@ -64,6 +64,13 @@ class _WaveformTaskContext:
     labels: dict[int, str] = field(default_factory=dict)
 
 
+@dataclass(slots=True)
+class _WaveformView:
+    peaks: tuple[float, ...]
+    progress_image: ft.Image
+    played_bars: int
+
+
 class DJMakerUI:
     """Связывает Flet-контролы с сервисным слоем приложения."""
 
@@ -91,7 +98,7 @@ class DJMakerUI:
         self._scan_task_paths: dict[str, Path] = {}
         self._artwork_task_contexts: dict[str, _BatchTaskContext] = {}
         self._waveform_task_contexts: dict[str, _WaveformTaskContext] = {}
-        self._waveform_bar_controls: dict[int, list[ft.Container]] = {}
+        self._waveform_views: dict[int, _WaveformView] = {}
         self.audio: fta.Audio | None = None
         self._player_track_id: int | None = None
         self._player_track_path: Path | None = None
@@ -268,10 +275,14 @@ class DJMakerUI:
             ),
         )
 
-    def _ensure_audio_service(self, track: TrackRecord) -> tuple[fta.Audio, bool]:
+    def _ensure_audio_service(
+        self,
+        track: TrackRecord,
+    ) -> tuple[fta.Audio, bool, bool]:
         """Лениво создаёт Audio service и сообщает о смене source."""
         source = track.path.expanduser().resolve()
-        source_changed = self.audio is None or self._player_track_path != source
+        created = self.audio is None
+        source_changed = created or self._player_track_path != source
         if self.audio is None:
             self.audio = fta.Audio(
                 src=str(source),
@@ -287,7 +298,7 @@ class DJMakerUI:
         elif source_changed:
             self.audio.src = str(source)
             self._player_track_path = source
-        return self.audio, source_changed
+        return self.audio, source_changed, created
 
     async def _on_player_loaded(self, _: object) -> None:
         """Запускает новый source только после его загрузки native-плеером."""
@@ -307,11 +318,16 @@ class DJMakerUI:
             track = await self.workers.run(self.service.track, track_id)
             if not track.path.is_file():
                 raise RuntimeError(f"Файл не найден: {track.path}")
-            audio, source_changed = self._ensure_audio_service(track)
+            audio, source_changed, audio_created = self._ensure_audio_service(track)
             previous_track_id = self._player_track_id
             self._player_track_id = track.id
+            waveform_updates: list[ft.Control] = []
             if previous_track_id is not None and previous_track_id != track.id:
-                self._paint_waveform_progress(previous_track_id, 0.0)
+                previous_waveform = self._paint_waveform_progress(
+                    previous_track_id, 0.0
+                )
+                if previous_waveform is not None:
+                    waveform_updates.append(previous_waveform)
             self._player_position_ms = max(0, position_ms)
             self._player_pending_position_ms = (
                 self._player_position_ms if source_changed else None
@@ -326,10 +342,25 @@ class DJMakerUI:
             self.player_title.value = f"{artist} - {title}"
             self.player_bar.visible = True
             self._refresh_player_controls()
-            self._refresh_waveform_progress()
-            if source_changed:
+            current_waveform = self._refresh_waveform_progress()
+            if current_waveform is not None:
+                waveform_updates.append(current_waveform)
+
+            if audio_created:
+                # Первый Audio service нужно смонтировать в дерево страницы.
                 self.page.update()
             else:
+                if source_changed:
+                    audio.update()
+                self.page.update(
+                    self.player_title,
+                    self.player_play_button,
+                    self.player_position,
+                    self.player_progress,
+                    *waveform_updates,
+                )
+
+            if not source_changed:
                 await audio.play(
                     position=ft.Duration(milliseconds=self._player_position_ms)
                 )
@@ -360,8 +391,15 @@ class DJMakerUI:
             self._player_position_ms = 0
             self._player_state = fta.AudioState.STOPPED
             self._refresh_player_controls()
-            self._refresh_waveform_progress()
-            self.page.update()
+            controls: list[ft.Control] = [
+                self.player_play_button,
+                self.player_position,
+                self.player_progress,
+            ]
+            waveform = self._refresh_waveform_progress()
+            if waveform is not None:
+                controls.append(waveform)
+            self.page.update(*controls)
         except Exception as exc:
             LOGGER.exception("Ошибка остановки плеера")
             self._notify(f"Ошибка плеера: {exc}")
@@ -369,28 +407,47 @@ class DJMakerUI:
     def _on_player_duration_change(self, event: fta.AudioDurationChangeEvent) -> None:
         self._player_duration_ms = max(0, event.duration.in_milliseconds)
         self._refresh_player_controls()
-        self._refresh_waveform_progress()
-        self.page.update()
+        controls: list[ft.Control] = [self.player_position, self.player_progress]
+        waveform = self._refresh_waveform_progress()
+        if waveform is not None:
+            controls.append(waveform)
+        self.page.update(*controls)
 
     def _on_player_position_change(self, event: fta.AudioPositionChangeEvent) -> None:
         self._player_position_ms = max(0, int(event.position))
         self._refresh_player_controls()
-        self._refresh_waveform_progress()
-        self.page.update()
+        controls: list[ft.Control] = [self.player_position, self.player_progress]
+        waveform = self._refresh_waveform_progress()
+        if waveform is not None:
+            controls.append(waveform)
+        self.page.update(*controls)
 
     def _on_player_state_change(self, event: fta.AudioStateChangeEvent) -> None:
         self._player_state = event.state
         if event.state is fta.AudioState.COMPLETED:
             self._player_position_ms = self._player_duration_ms
         self._refresh_player_controls()
-        self._refresh_waveform_progress()
-        self.page.update()
+        controls: list[ft.Control] = [
+            self.player_play_button,
+            self.player_position,
+            self.player_progress,
+        ]
+        waveform = self._refresh_waveform_progress()
+        if waveform is not None:
+            controls.append(waveform)
+        self.page.update(*controls)
 
     def _refresh_player_controls(self) -> None:
         duration = self._player_duration_ms
-        position = min(self._player_position_ms, duration) if duration else self._player_position_ms
+        position = (
+            min(self._player_position_ms, duration)
+            if duration
+            else self._player_position_ms
+        )
         self.player_play_button.icon = (
-            ft.Icons.PAUSE if self._player_state is fta.AudioState.PLAYING else ft.Icons.PLAY_ARROW
+            ft.Icons.PAUSE
+            if self._player_state is fta.AudioState.PLAYING
+            else ft.Icons.PLAY_ARROW
         )
         self.player_position.value = (
             f"{self._format_duration(position / 1000)} / "
@@ -403,6 +460,34 @@ class DJMakerUI:
         return (
             COMPACT_UI.waveform_bar_count * COMPACT_UI.waveform_bar_width
             + (COMPACT_UI.waveform_bar_count - 1) * COMPACT_UI.waveform_bar_gap
+        )
+
+    @staticmethod
+    def _waveform_svg(
+        peaks: tuple[float, ...],
+        played_bars: int | None = None,
+    ) -> str:
+        """Рисует waveform одним SVG вместо десятков Flet-контролов."""
+        width = DJMakerUI._waveform_width()
+        height = COMPACT_UI.waveform_height
+        limit = len(peaks) if played_bars is None else max(0, played_bars)
+        rectangles: list[str] = []
+        for index, peak in enumerate(peaks[:limit]):
+            normalized = min(1.0, max(0.0, float(peak)))
+            bar_height = max(
+                COMPACT_UI.waveform_min_bar_height,
+                round(height * normalized),
+            )
+            x = index * (COMPACT_UI.waveform_bar_width + COMPACT_UI.waveform_bar_gap)
+            y = height - bar_height
+            rectangles.append(
+                f'<rect x="{x}" y="{y}" width="{COMPACT_UI.waveform_bar_width}" '
+                f'height="{bar_height}" rx="1" fill="#000"/>'
+            )
+        return (
+            f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" '
+            f'height="{height}" viewBox="0 0 {width} {height}">'
+            f'{"".join(rectangles)}</svg>'
         )
 
     def _play_from_waveform(self, event: ft.TapEvent, track: TrackRecord) -> None:
@@ -419,25 +504,31 @@ class DJMakerUI:
         position_ms = int(duration * fraction * 1000)
         self.page.run_task(self._play_track, track.id, position_ms)
 
-    def _refresh_waveform_progress(self) -> None:
+    def _refresh_waveform_progress(self) -> ft.Control | None:
         track_id = self._player_track_id
         if track_id is None:
-            return
+            return None
         duration = self._player_duration_ms
         fraction = (self._player_position_ms / duration) if duration > 0 else 0.0
-        self._paint_waveform_progress(track_id, fraction)
+        return self._paint_waveform_progress(track_id, fraction)
 
-    def _paint_waveform_progress(self, track_id: int, fraction: float) -> None:
-        bars = self._waveform_bar_controls.get(track_id)
-        if not bars:
-            return
-        played = min(len(bars), max(0, round(len(bars) * fraction)))
-        for index, bar in enumerate(bars):
-            bar.bgcolor = (
-                ft.Colors.PRIMARY
-                if index < played
-                else ft.Colors.SURFACE_CONTAINER_HIGHEST
-            )
+    def _paint_waveform_progress(
+        self,
+        track_id: int,
+        fraction: float,
+    ) -> ft.Control | None:
+        view = self._waveform_views.get(track_id)
+        if view is None:
+            return None
+        played = min(
+            len(view.peaks),
+            max(0, round(len(view.peaks) * min(1.0, max(0.0, fraction)))),
+        )
+        if played == view.played_bars:
+            return None
+        view.played_bars = played
+        view.progress_image.src = self._waveform_svg(view.peaks, played)
+        return view.progress_image
 
     def _build_navigation(self) -> ft.NavigationRail:
         """Создаёт постоянную боковую навигацию приложения."""
@@ -892,7 +983,7 @@ class DJMakerUI:
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
             spacing=COMPACT_UI.space_sm,
         )
-        self._waveform_bar_controls.clear()
+        self._waveform_views.clear()
         items: list[ft.Control] = []
         if not tracks:
             items.append(
@@ -1034,37 +1125,49 @@ class DJMakerUI:
         values = list(peaks[: COMPACT_UI.waveform_bar_count])
         if len(values) < COMPACT_UI.waveform_bar_count:
             values.extend([0.0] * (COMPACT_UI.waveform_bar_count - len(values)))
+        normalized_peaks = tuple(
+            min(1.0, max(0.0, float(peak))) for peak in values
+        )
 
-        bars: list[ft.Container] = []
-        for peak in values:
-            normalized = min(1.0, max(0.0, float(peak)))
-            height = max(
-                COMPACT_UI.waveform_min_bar_height,
-                round(COMPACT_UI.waveform_height * normalized),
-            )
-            bars.append(
-                ft.Container(
-                    width=COMPACT_UI.waveform_bar_width,
-                    height=height,
-                    border_radius=1,
-                    bgcolor=ft.Colors.SURFACE_CONTAINER_HIGHEST,
-                )
-            )
-
-        self._waveform_bar_controls[track.id] = bars
+        played = 0
         if self._player_track_id == track.id:
             duration = self._player_duration_ms
             fraction = (self._player_position_ms / duration) if duration > 0 else 0.0
-            self._paint_waveform_progress(track.id, fraction)
+            played = min(
+                len(normalized_peaks),
+                max(0, round(len(normalized_peaks) * fraction)),
+            )
+
+        base_image = ft.Image(
+            src=self._waveform_svg(normalized_peaks),
+            width=self._waveform_width(),
+            height=COMPACT_UI.waveform_height,
+            fit=ft.BoxFit.FILL,
+            color=ft.Colors.SURFACE_CONTAINER_HIGHEST,
+            exclude_from_semantics=True,
+        )
+        progress_image = ft.Image(
+            src=self._waveform_svg(normalized_peaks, played),
+            width=self._waveform_width(),
+            height=COMPACT_UI.waveform_height,
+            fit=ft.BoxFit.FILL,
+            color=ft.Colors.PRIMARY,
+            exclude_from_semantics=True,
+        )
+        self._waveform_views[track.id] = _WaveformView(
+            peaks=normalized_peaks,
+            progress_image=progress_image,
+            played_bars=played,
+        )
 
         waveform = ft.Container(
             width=self._waveform_width(),
             height=COMPACT_UI.track_icon_box,
             alignment=ft.Alignment.CENTER,
-            content=ft.Row(
-                controls=bars,
-                spacing=COMPACT_UI.waveform_bar_gap,
-                vertical_alignment=ft.CrossAxisAlignment.END,
+            content=ft.Stack(
+                controls=[base_image, progress_image],
+                width=self._waveform_width(),
+                height=COMPACT_UI.waveform_height,
             ),
         )
         return ft.GestureDetector(
@@ -1758,7 +1861,7 @@ class DJMakerUI:
                 self._forget_task_context(task_id)
                 return
 
-            concurrency = min(2, self.workers.max_workers, len(pending_ids))
+            concurrency = min(1, self.workers.max_workers, len(pending_ids))
             task.set_progress(detail=f"Waveform · потоков: {concurrency}")
 
             def analyze_one(track_id: int) -> TrackRecord:

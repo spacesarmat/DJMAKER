@@ -22,6 +22,9 @@ class WaveformHelpersTests(unittest.TestCase):
         self.assertIn("1", command)
         self.assertIn("-ar", command)
         self.assertIn(str(WAVEFORM_SAMPLE_RATE), command)
+        self.assertIn("-threads", command)
+        thread_index = command.index("-threads")
+        self.assertEqual("1", command[thread_index + 1])
         self.assertEqual("pipe:1", command[-1])
 
     def test_extract_waveform_peaks_returns_fixed_normalized_bar_count(self) -> None:
