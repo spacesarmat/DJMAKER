@@ -1,11 +1,14 @@
-# DJMAKER patch 0008
+# DJMAKER patch 0009
 
-Исправляет запуск `scripts/trigger_essentia_build.ps1` в Windows PowerShell 5.1.
+Исправлена совместимость `scripts/trigger_essentia_build.ps1` с Windows PowerShell 5.1.
+
+Причина: `ConvertFrom-Json` в Windows PowerShell 5.1 может возвращать JSON-массив от `gh run list` как единый массив-объект. При `Set-StrictMode` обращение к свойству `databaseId` такого контейнера вызывает `PropertyNotFoundStrict`.
 
 Изменения:
 
-- PowerShell helper теперь полностью ASCII-only и не зависит от системной кодировки Windows.
-- Убраны хрупкие backtick-переносы команд.
-- Перед запуском проверяются `gh`, авторизация и наличие workflow в удалённом репозитории.
-- Скрипт запоминает существующие workflow runs и после dispatch ждёт именно новый run.
-- Добавлены регрессионные unit-тесты для кодировки helper-скрипта.
+- JSON больше не разбирается средствами PowerShell.
+- GitHub CLI сам извлекает `databaseId` через `--jq '.[].databaseId'`.
+- ID workflow runs обрабатываются как обычные строки.
+- Сохранена защита от захвата старого workflow run.
+- Helper остаётся полностью ASCII-only для Windows PowerShell 5.1.
+- Добавлен регрессионный unit-тест против возврата к `ConvertFrom-Json`.

@@ -27,6 +27,15 @@ class PowerShellHelperTests(unittest.TestCase):
         self.assertIn("gh run watch", source)
         self.assertIn("-notcontains", source)
 
+    def test_essentia_trigger_does_not_parse_gh_json_in_powershell(self) -> None:
+        path = PROJECT_ROOT / "scripts" / "trigger_essentia_build.ps1"
+        source = path.read_text(encoding="ascii")
+
+        self.assertNotIn("ConvertFrom-Json", source)
+        self.assertNotIn("$_.databaseId", source)
+        self.assertIn("--jq '.[].databaseId'", source)
+        self.assertIn("Get-WorkflowRunIds", source)
+
 
 if __name__ == "__main__":
     unittest.main()
