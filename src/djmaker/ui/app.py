@@ -30,7 +30,13 @@ from djmaker.services.tasks import (
     TaskStatus,
 )
 from djmaker.services.workers import BackgroundWorkers
-from djmaker.settings import AppSettings, SettingsStore, THEME_MODES
+from djmaker.settings import (
+    AppSettings,
+    SettingsStore,
+    THEME_COLOR_ROLES,
+    THEME_MODES,
+    is_valid_theme_color,
+)
 from djmaker.ui.density import COMPACT_UI
 from djmaker.ui.scrolling import centered_scroll_offset
 from djmaker.ui.theme import (
@@ -44,6 +50,28 @@ from djmaker.ui.theme import (
 
 
 LOGGER = logging.getLogger(__name__)
+
+_LIBRARY_SEARCH_DEBOUNCE_SECONDS = 0.22
+_THEME_EDITOR_MODE_LABELS = {
+    "light": "Светлая",
+    "dark": "Тёмная",
+}
+_THEME_ROLE_LABELS = {
+    "primary": "Акцент",
+    "on_primary": "Текст на акценте",
+    "primary_container": "Акцентный контейнер",
+    "on_primary_container": "Текст акцентного контейнера",
+    "surface": "Основной фон",
+    "surface_container_low": "Карточки",
+    "surface_container": "Панели",
+    "surface_container_high": "Выделение",
+    "surface_container_highest": "Активная поверхность",
+    "on_surface": "Основной текст",
+    "on_surface_variant": "Вторичный текст",
+    "outline": "Контур",
+    "outline_variant": "Мягкий контур",
+    "error": "Ошибка",
+}
 
 
 @dataclass(slots=True)
@@ -107,6 +135,14 @@ class DJMakerUI:
         self._selected_track_id: int | None = None
         self._library_viewport_extent = 0.0
         self._library_max_scroll_extent = 0.0
+        self._search_revision = 0
+        self._theme_editor_active = False
+        self._theme_editor_mode = self._initial_theme_editor_mode()
+        self._theme_draft_light: dict[str, str] = {}
+        self._theme_draft_dark: dict[str, str] = {}
+        self._theme_editor_fields: dict[str, ft.TextField] = {}
+        self._theme_editor_swatches: dict[str, ft.Container] = {}
+        self._theme_editor_status: ft.Text | None = None
         self.audio: fta.Audio | None = None
         self._player_track_id: int | None = None
         self._player_track_path: Path | None = None
@@ -116,12 +152,22 @@ class DJMakerUI:
         self._player_pending_position_ms: int | None = None
 
         self.search = ft.TextField(
-            hint_text="Поиск в медиатеке",
+            hint_text="Исполнитель, название, альбом, жанр, формат или путь",
             expand=True,
             dense=True,
             text_size=COMPACT_UI.font_sm,
             content_padding=ft.Padding.symmetric(horizontal=8, vertical=4),
+            on_change=self._on_search_change,
             on_submit=self._on_search,
+        )
+        self.search_clear_button = ft.IconButton(
+            icon=ft.Icons.CLOSE,
+            icon_size=COMPACT_UI.action_icon_size,
+            padding=COMPACT_UI.space_xs,
+            visual_density=ft.VisualDensity.COMPACT,
+            tooltip="Очистить поиск",
+            visible=False,
+            on_click=self._clear_search,
         )
         self.busy = ft.ProgressRing(width=16, height=16, visible=False)
         self.status = ft.Text(
@@ -649,8 +695,78 @@ class DJMakerUI:
             handlers[index]()
 
     def _set_navigation_index(self, index: int) -> None:
+        if self.navigation.selected_index == 6 and index != 6:
+            self._close_theme_editor_session()
         if self.navigation.selected_index != index:
             self.navigation.selected_index = index
+
+    def _initial_theme_editor_mode(self) -> str:
+        """Выбирает редактируемую схему, соответствующую текущему интерфейсу."""
+        if self.settings.theme_mode in _THEME_EDITOR_MODE_LABELS:
+            return self.settings.theme_mode
+        brightness = getattr(self.page, "platform_brightness", None)
+        value = str(getattr(brightness, "value", brightness or "")).lower()
+        return "dark" if "dark" in value else "light"
+
+    def _begin_theme_editor_session(self) -> None:
+        if self._theme_editor_active:
+            return
+        self._theme_editor_active = True
+        self._theme_editor_mode = self._initial_theme_editor_mode()
+        self._theme_draft_light = dict(self.settings.theme_light_overrides)
+        self._theme_draft_dark = dict(self.settings.theme_dark_overrides)
+
+    def _close_theme_editor_session(self) -> None:
+        if not self._theme_editor_active:
+            return
+        self._theme_editor_active = False
+        self._theme_editor_fields.clear()
+        self._theme_editor_swatches.clear()
+        self._theme_editor_status = None
+        apply_app_theme(self.page, self.settings)
+
+    def _theme_draft_for_mode(self, mode: str | None = None) -> dict[str, str]:
+        target = mode or self._theme_editor_mode
+        return self._theme_draft_dark if target == "dark" else self._theme_draft_light
+
+    def _theme_preview_settings(self) -> AppSettings:
+        return replace(
+            self.settings,
+            theme_light_overrides=dict(self._theme_draft_light),
+            theme_dark_overrides=dict(self._theme_draft_dark),
+        )
+
+    def _theme_editor_changed_count(self) -> int:
+        saved_light = self.settings.theme_light_overrides
+        saved_dark = self.settings.theme_dark_overrides
+        roles = set(THEME_COLOR_ROLES)
+        return sum(
+            self._theme_draft_light.get(role) != saved_light.get(role)
+            for role in roles
+        ) + sum(
+            self._theme_draft_dark.get(role) != saved_dark.get(role)
+            for role in roles
+        )
+
+    def _apply_theme_editor_preview(self) -> None:
+        preview = self._theme_preview_settings()
+        apply_app_theme(self.page, preview)
+        self.page.theme_mode = (
+            ft.ThemeMode.DARK
+            if self._theme_editor_mode == "dark"
+            else ft.ThemeMode.LIGHT
+        )
+        changed = self._theme_editor_changed_count()
+        if self._theme_editor_status is not None:
+            if changed:
+                self._theme_editor_status.value = (
+                    f"Предпросмотр · несохранённых изменений: {changed}"
+                )
+                self._theme_editor_status.color = ft.Colors.PRIMARY
+            else:
+                self._theme_editor_status.value = "Предпросмотр совпадает с сохранённой темой"
+                self._theme_editor_status.color = ft.Colors.ON_SURFACE_VARIANT
+        self.page.update()
 
     def _set_busy(self, value: bool, message: str = "") -> None:
         self.busy.visible = value
@@ -957,7 +1073,63 @@ class DJMakerUI:
         )
 
     async def _on_search(self, _: object) -> None:
+        """Немедленно применяет поисковый запрос по Enter."""
+        self._search_revision += 1
         self.show_library()
+
+    def _on_search_change(self, _: object) -> None:
+        """Дебаунсит живой поиск, чтобы не перестраивать 1000 строк на каждый символ."""
+        self._search_revision += 1
+        revision = self._search_revision
+        self.search_clear_button.visible = bool((self.search.value or "").strip())
+        self.page.update(self.search_clear_button)
+        self.page.run_task(self._debounced_library_search, revision)
+
+    async def _debounced_library_search(self, revision: int) -> None:
+        await asyncio.sleep(_LIBRARY_SEARCH_DEBOUNCE_SECONDS)
+        if revision != self._search_revision or self.navigation.selected_index != 0:
+            return
+        self.show_library()
+
+    def _clear_search(self, _: object) -> None:
+        self.search.value = ""
+        self.search_clear_button.visible = False
+        self._search_revision += 1
+        self.show_library()
+
+    def _build_library_search_block(self, result_count: int) -> ft.Container:
+        """Возвращает тематический поисковый блок медиатеки."""
+        return ft.Container(
+            bgcolor=ft.Colors.SURFACE_CONTAINER,
+            border_radius=COMPACT_UI.radius,
+            padding=ft.Padding.symmetric(
+                horizontal=COMPACT_UI.card_padding,
+                vertical=COMPACT_UI.space_sm,
+            ),
+            content=ft.Row(
+                controls=[
+                    ft.Icon(
+                        ft.Icons.SEARCH,
+                        size=COMPACT_UI.action_icon_size,
+                        color=ft.Colors.PRIMARY,
+                    ),
+                    self.search,
+                    self.search_clear_button,
+                    ft.Container(
+                        width=1,
+                        height=22,
+                        bgcolor=ft.Colors.OUTLINE_VARIANT,
+                    ),
+                    ft.Text(
+                        f"Найдено: {result_count}",
+                        size=COMPACT_UI.font_xs,
+                        color=ft.Colors.ON_SURFACE_VARIANT,
+                    ),
+                ],
+                spacing=COMPACT_UI.space_sm,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+        )
 
     def show_library(self) -> None:
         """Отображает локальную медиатеку."""
@@ -975,7 +1147,7 @@ class DJMakerUI:
                     size=COMPACT_UI.font_sm,
                     weight=ft.FontWeight.BOLD,
                 ),
-                self.search,
+                ft.Container(expand=True),
                 self.busy,
                 ft.Button(
                     content="BPM / Key",
@@ -1024,10 +1196,12 @@ class DJMakerUI:
                 scroll_interval=50,
             )
         self._library_list = listing
+        self.search_clear_button.visible = bool((self.search.value or "").strip())
         self._replace_content(
             "Медиатека",
             "Поиск, теги и организация локальной музыкальной коллекции",
             actions,
+            self._build_library_search_block(len(tracks)),
             listing,
         )
 
@@ -2232,6 +2406,199 @@ class DJMakerUI:
             spacing=COMPACT_UI.space_sm,
         )
 
+    def _build_theme_editor(self) -> ft.Container:
+        """Строит глобальный редактор цветовых ролей с живым предпросмотром."""
+        self._begin_theme_editor_session()
+        draft = self._theme_draft_for_mode()
+        self._theme_editor_fields.clear()
+        self._theme_editor_swatches.clear()
+
+        editor_mode = ft.Dropdown(
+            label="Редактируемая схема",
+            dense=True,
+            text_size=COMPACT_UI.font_sm,
+            value=self._theme_editor_mode,
+            options=[
+                ft.DropdownOption(key=key, text=label)
+                for key, label in _THEME_EDITOR_MODE_LABELS.items()
+            ],
+            on_select=self._on_theme_editor_mode_selected,
+        )
+
+        def build_role(role: str) -> ft.Control:
+            value = draft.get(role, "")
+            swatch = ft.Container(
+                width=18,
+                height=18,
+                border_radius=4,
+                bgcolor=value or ft.Colors.OUTLINE_VARIANT,
+            )
+            field = ft.TextField(
+                label=_THEME_ROLE_LABELS[role],
+                hint_text="#RRGGBB · пусто = наследовать",
+                value=value,
+                dense=True,
+                text_size=COMPACT_UI.font_xs,
+                expand=True,
+                on_change=lambda event, color_role=role: self._on_theme_color_changed(
+                    color_role, event
+                ),
+            )
+            self._theme_editor_fields[role] = field
+            self._theme_editor_swatches[role] = swatch
+            return ft.Row(
+                controls=[swatch, field],
+                spacing=COMPACT_UI.space_sm,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            )
+
+        split = (len(THEME_COLOR_ROLES) + 1) // 2
+        left = ft.Column(
+            controls=[build_role(role) for role in THEME_COLOR_ROLES[:split]],
+            spacing=COMPACT_UI.space_sm,
+            expand=True,
+        )
+        right = ft.Column(
+            controls=[build_role(role) for role in THEME_COLOR_ROLES[split:]],
+            spacing=COMPACT_UI.space_sm,
+            expand=True,
+        )
+
+        changed = self._theme_editor_changed_count()
+        self._theme_editor_status = ft.Text(
+            (
+                f"Предпросмотр · несохранённых изменений: {changed}"
+                if changed
+                else "Предпросмотр совпадает с сохранённой темой"
+            ),
+            size=COMPACT_UI.font_xs,
+            color=ft.Colors.PRIMARY if changed else ft.Colors.ON_SURFACE_VARIANT,
+        )
+
+        return self._surface_card(
+            ft.Column(
+                controls=[
+                    ft.Row(
+                        controls=[
+                            ft.Icon(
+                                ft.Icons.TUNE,
+                                color=ft.Colors.PRIMARY,
+                                size=COMPACT_UI.action_icon_size,
+                            ),
+                            ft.Text(
+                                "Глобальный редактор темы",
+                                size=COMPACT_UI.font_lg,
+                                weight=ft.FontWeight.BOLD,
+                            ),
+                            ft.Container(expand=True),
+                            editor_mode,
+                        ],
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    ),
+                    ft.Text(
+                        "Цвета накладываются поверх выбранной базовой темы. "
+                        "Корректный #RRGGBB применяется сразу; пустое поле "
+                        "возвращает значение базовой темы.",
+                        size=COMPACT_UI.font_xs,
+                        color=ft.Colors.ON_SURFACE_VARIANT,
+                    ),
+                    ft.Row(
+                        controls=[left, right],
+                        spacing=COMPACT_UI.space_md,
+                        vertical_alignment=ft.CrossAxisAlignment.START,
+                    ),
+                    ft.Row(
+                        controls=[
+                            ft.Button(
+                                content="Сохранить",
+                                icon=ft.Icons.SAVE_OUTLINED,
+                                on_click=self._save_theme_editor,
+                            ),
+                            ft.Button(
+                                content="Вернуть сохранённое",
+                                icon=ft.Icons.UNDO,
+                                on_click=self._revert_theme_editor,
+                            ),
+                            ft.Button(
+                                content="Сбросить текущую схему",
+                                icon=ft.Icons.RESTART_ALT,
+                                on_click=self._reset_theme_editor_mode,
+                            ),
+                            ft.Container(expand=True),
+                            self._theme_editor_status,
+                        ],
+                        spacing=COMPACT_UI.space_sm,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    ),
+                ],
+                spacing=COMPACT_UI.space_sm,
+            )
+        )
+
+    def _on_theme_editor_mode_selected(self, event: object) -> None:
+        control = getattr(event, "control", None)
+        value = getattr(control, "value", None)
+        if not isinstance(value, str) or value not in _THEME_EDITOR_MODE_LABELS:
+            return
+        self._theme_editor_mode = value
+        self.show_settings()
+        self._apply_theme_editor_preview()
+
+    def _on_theme_color_changed(self, role: str, event: object) -> None:
+        control = getattr(event, "control", None)
+        if not isinstance(control, ft.TextField) or role not in THEME_COLOR_ROLES:
+            return
+
+        raw = (control.value or "").strip()
+        swatch = self._theme_editor_swatches.get(role)
+        status = self._theme_editor_status
+        if raw and not is_valid_theme_color(raw):
+            control.border_color = ft.Colors.ERROR
+            if swatch is not None:
+                swatch.bgcolor = ft.Colors.ERROR_CONTAINER
+            if status is not None:
+                status.value = f"{_THEME_ROLE_LABELS[role]}: ожидается #RRGGBB"
+                status.color = ft.Colors.ERROR
+            updates = [item for item in (control, swatch, status) if item is not None]
+            self.page.update(*updates)
+            return
+
+        control.border_color = None
+        draft = self._theme_draft_for_mode()
+        if raw:
+            normalized = raw.upper()
+            draft[role] = normalized
+            if swatch is not None:
+                swatch.bgcolor = normalized
+        else:
+            draft.pop(role, None)
+            if swatch is not None:
+                swatch.bgcolor = ft.Colors.OUTLINE_VARIANT
+        self._apply_theme_editor_preview()
+
+    def _save_theme_editor(self, _: object) -> None:
+        invalid = [
+            field
+            for field in self._theme_editor_fields.values()
+            if (field.value or "").strip()
+            and not is_valid_theme_color((field.value or "").strip())
+        ]
+        if invalid:
+            self._notify("Исправьте некорректные HEX-цвета перед сохранением")
+            return
+        self._save_and_apply_settings(self._theme_preview_settings())
+
+    def _revert_theme_editor(self, _: object) -> None:
+        self._theme_draft_light = dict(self.settings.theme_light_overrides)
+        self._theme_draft_dark = dict(self.settings.theme_dark_overrides)
+        self.show_settings()
+        self._apply_theme_editor_preview()
+
+    def _reset_theme_editor_mode(self, _: object) -> None:
+        self._theme_draft_for_mode().clear()
+        self.show_settings()
+        self._apply_theme_editor_preview()
+
     def show_settings(self) -> None:
         """Показывает настройки оформления и локальные пути приложения."""
         self._set_navigation_index(6)
@@ -2269,7 +2636,8 @@ class DJMakerUI:
                     ),
                     ft.Text(
                         "Системный режим автоматически следует настройке Windows или macOS. "
-                        "Цветовая схема применяется одновременно к светлой и тёмной теме.",
+                        "Базовая палитра общая, а пользовательские цвета можно "
+                        "настроить отдельно для светлой и тёмной схемы.",
                         size=COMPACT_UI.font_xs,
                     ),
                     mode_dropdown,
@@ -2283,6 +2651,8 @@ class DJMakerUI:
                 spacing=5,
             )
         )
+
+        theme_editor = self._build_theme_editor()
 
         storage = self._surface_card(
             ft.Column(
@@ -2318,13 +2688,22 @@ class DJMakerUI:
             )
         )
 
+        settings_list = ft.ListView(
+            controls=[
+                self._runtime_card(self.runtime_report),
+                appearance,
+                theme_editor,
+                storage,
+                organizer,
+            ],
+            expand=True,
+            spacing=COMPACT_UI.space_md,
+            padding=0,
+        )
         self._replace_content(
             "Настройки",
             f"Тема: {THEME_MODE_LABELS[self.settings.theme_mode]} · {palette_title(self.settings.theme_palette)}",
-            self._runtime_card(self.runtime_report),
-            appearance,
-            storage,
-            organizer,
+            settings_list,
         )
 
     @staticmethod
@@ -2370,6 +2749,10 @@ class DJMakerUI:
             return
 
         self.settings = settings
+        self._theme_editor_active = False
+        self._theme_editor_fields.clear()
+        self._theme_editor_swatches.clear()
+        self._theme_editor_status = None
         apply_app_theme(self.page, self.settings)
         self.theme_button.icon = theme_mode_icon(self.settings.theme_mode)
         self.theme_button.tooltip = self._theme_tooltip()

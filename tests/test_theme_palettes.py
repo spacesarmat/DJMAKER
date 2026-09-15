@@ -30,8 +30,10 @@ class ThemePaletteTests(unittest.TestCase):
         self.assertIn('"clean_graphene": (', source)
         self.assertIn('"strict": (', source)
         self.assertGreaterEqual(source.count("ft.ColorScheme("), 4)
-        self.assertIn("page.theme = _build_theme(palette, dark=False)", source)
-        self.assertIn("page.dark_theme = _build_theme(palette, dark=True)", source)
+        self.assertIn("page.theme = _build_theme(", source)
+        self.assertIn("page.dark_theme = _build_theme(", source)
+        self.assertIn("overrides=settings.theme_light_overrides", source)
+        self.assertIn("overrides=settings.theme_dark_overrides", source)
 
     def test_settings_show_palette_description(self) -> None:
         source = APP_SOURCE.read_text(encoding="utf-8")

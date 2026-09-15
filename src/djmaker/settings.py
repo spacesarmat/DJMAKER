@@ -5,7 +5,8 @@ from __future__ import annotations
 import json
 import logging
 import os
-from dataclasses import asdict, dataclass
+import re
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +26,42 @@ THEME_PALETTES = (
 DEFAULT_THEME_MODE = "system"
 DEFAULT_THEME_PALETTE = "djmaker_blue"
 
+THEME_COLOR_ROLES = (
+    "primary",
+    "on_primary",
+    "primary_container",
+    "on_primary_container",
+    "surface",
+    "surface_container_low",
+    "surface_container",
+    "surface_container_high",
+    "surface_container_highest",
+    "on_surface",
+    "on_surface_variant",
+    "outline",
+    "outline_variant",
+    "error",
+)
+_HEX_COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
+
+
+def normalize_theme_overrides(value: object) -> dict[str, str]:
+    """Возвращает безопасные пользовательские цвета темы из JSON-значения."""
+    if not isinstance(value, dict):
+        return {}
+
+    normalized: dict[str, str] = {}
+    for role in THEME_COLOR_ROLES:
+        color = value.get(role)
+        if isinstance(color, str) and _HEX_COLOR_RE.fullmatch(color.strip()):
+            normalized[role] = color.strip().upper()
+    return normalized
+
+
+def is_valid_theme_color(value: str) -> bool:
+    """Проверяет пользовательский цвет в формате ``#RRGGBB``."""
+    return bool(_HEX_COLOR_RE.fullmatch(value.strip()))
+
 
 @dataclass(frozen=True, slots=True)
 class AppSettings:
@@ -32,6 +69,8 @@ class AppSettings:
 
     theme_mode: str = DEFAULT_THEME_MODE
     theme_palette: str = DEFAULT_THEME_PALETTE
+    theme_light_overrides: dict[str, str] = field(default_factory=dict)
+    theme_dark_overrides: dict[str, str] = field(default_factory=dict)
 
     @classmethod
     def from_mapping(cls, data: dict[str, Any]) -> "AppSettings":
@@ -44,7 +83,16 @@ class AppSettings:
         if palette not in THEME_PALETTES:
             palette = DEFAULT_THEME_PALETTE
 
-        return cls(theme_mode=mode, theme_palette=palette)
+        return cls(
+            theme_mode=mode,
+            theme_palette=palette,
+            theme_light_overrides=normalize_theme_overrides(
+                data.get("theme_light_overrides")
+            ),
+            theme_dark_overrides=normalize_theme_overrides(
+                data.get("theme_dark_overrides")
+            ),
+        )
 
 
 class SettingsStore:

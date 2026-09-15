@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace as dataclass_replace
 
 import flet as ft
 
@@ -273,14 +273,27 @@ def _compact_data_table_theme() -> ft.DataTableTheme:
     )
 
 
-def _build_theme(palette: ThemePalette, *, dark: bool) -> ft.Theme:
-    """Создаёт тему с выбранной палитрой и компактной плотностью."""
+def _build_theme(
+    palette: ThemePalette,
+    *,
+    dark: bool,
+    overrides: dict[str, str] | None = None,
+) -> ft.Theme:
+    """Создаёт тему и накладывает пользовательские цветовые override-роли."""
     custom_pair = _CUSTOM_COLOR_SCHEMES.get(palette.key)
+    color_overrides = overrides or {}
     kwargs: dict[str, object]
     if custom_pair is None:
         kwargs = {"color_scheme_seed": palette.seed}
+        if color_overrides:
+            # Flet/Flutter сначала строит ColorScheme из seed, после чего
+            # частичный ColorScheme копирует только заданные пользователем роли.
+            kwargs["color_scheme"] = ft.ColorScheme(**color_overrides)
     else:
-        kwargs = {"color_scheme": custom_pair[1 if dark else 0]}
+        scheme = custom_pair[1 if dark else 0]
+        if color_overrides:
+            scheme = dataclass_replace(scheme, **color_overrides)
+        kwargs = {"color_scheme": scheme}
 
     return ft.Theme(
         **kwargs,
@@ -294,8 +307,16 @@ def apply_app_theme(page: ft.Page, settings: AppSettings) -> None:
     """Применяет выбранный режим и цветовую схему ко всей странице Flet."""
     palette = _PALETTE_BY_KEY.get(settings.theme_palette, THEME_PALETTES[0])
 
-    page.theme = _build_theme(palette, dark=False)
-    page.dark_theme = _build_theme(palette, dark=True)
+    page.theme = _build_theme(
+        palette,
+        dark=False,
+        overrides=settings.theme_light_overrides,
+    )
+    page.dark_theme = _build_theme(
+        palette,
+        dark=True,
+        overrides=settings.theme_dark_overrides,
+    )
     page.theme_mode = {
         "light": ft.ThemeMode.LIGHT,
         "dark": ft.ThemeMode.DARK,

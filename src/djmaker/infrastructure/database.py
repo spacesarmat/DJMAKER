@@ -401,11 +401,32 @@ class LibraryDatabase:
             pattern = f"%{search}%"
             sql = """
                 SELECT * FROM tracks
-                WHERE title LIKE ? OR artist LIKE ? OR album LIKE ? OR path LIKE ?
+                WHERE title LIKE ?
+                   OR artist LIKE ?
+                   OR album LIKE ?
+                   OR album_artist LIKE ?
+                   OR genre LIKE ?
+                   OR extension LIKE ?
+                   OR musical_key LIKE ?
+                   OR analysis_key LIKE ?
+                   OR analysis_camelot LIKE ?
+                   OR path LIKE ?
                 ORDER BY artist COLLATE NOCASE, album COLLATE NOCASE, track_number, title COLLATE NOCASE
                 LIMIT ?
             """
-            params = (pattern, pattern, pattern, pattern, limit)
+            params = (
+                pattern,
+                pattern,
+                pattern,
+                pattern,
+                pattern,
+                pattern,
+                pattern,
+                pattern,
+                pattern,
+                pattern,
+                limit,
+            )
         else:
             sql = """
                 SELECT * FROM tracks

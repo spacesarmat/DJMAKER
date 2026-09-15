@@ -56,6 +56,43 @@ class LibraryDatabaseTests(unittest.TestCase):
         tracks = self.db.list_tracks(search="Artist")
         self.assertEqual(1, len(tracks))
 
+    def test_search_finds_genre_format_and_camelot(self) -> None:
+        path = self.root / "club.flac"
+        path.write_bytes(b"audio")
+        stat = path.stat()
+        self.db.upsert_track(
+            path=path,
+            root=self.root,
+            size=stat.st_size,
+            mtime_ns=stat.st_mtime_ns,
+            extension=path.suffix,
+            file_hash="club-hash",
+            metadata=AudioMetadata(
+                title="Night Drive",
+                artist="DJ Test",
+                album_artist="Various",
+                genre="Tech House",
+                musical_key="A minor",
+            ),
+            technical=AudioTechnicalInfo(duration=123.0),
+            scan_token="token",
+        )
+        track = self.db.list_tracks()[0]
+        self.db.save_audio_analysis(
+            track.id,
+            AudioAnalysis(
+                bpm=128.0,
+                musical_key="A",
+                scale="minor",
+                camelot="8A",
+            ),
+        )
+
+        self.assertEqual(1, len(self.db.list_tracks(search="Tech House")))
+        self.assertEqual(1, len(self.db.list_tracks(search="flac")))
+        self.assertEqual(1, len(self.db.list_tracks(search="8A")))
+        self.assertEqual(1, len(self.db.list_tracks(search="Various")))
+
     def test_audio_analysis_is_saved_separately_from_tags(self) -> None:
         self._insert("one.mp3", "abc")
         track = self.db.list_tracks()[0]
