@@ -14,6 +14,7 @@ from djmaker.plugins.base import MetadataProviderError
 from djmaker.services.library import LibraryService
 from djmaker.services.workers import BackgroundWorkers
 from djmaker.settings import AppSettings, SettingsStore, THEME_MODES
+from djmaker.ui.density import COMPACT_UI
 from djmaker.ui.theme import (
     THEME_MODE_LABELS,
     THEME_PALETTES,
@@ -49,15 +50,34 @@ class DJMakerUI:
             label="Поиск в медиатеке",
             hint_text="Название, артист, альбом или путь",
             expand=True,
+            dense=True,
+            text_size=COMPACT_UI.font_sm,
+            content_padding=ft.Padding.symmetric(horizontal=8, vertical=4),
             on_submit=self._on_search,
         )
-        self.busy = ft.ProgressRing(width=20, height=20, visible=False)
-        self.status = ft.Text("Готово", size=12)
-        self.content = ft.Column(expand=True, spacing=12)
-        self.header_title = ft.Text("Медиатека", size=24, weight=ft.FontWeight.BOLD)
-        self.header_subtitle = ft.Text("Локальная музыкальная библиотека", size=12)
+        self.busy = ft.ProgressRing(width=16, height=16, visible=False)
+        self.status = ft.Text(
+            "Готово",
+            size=COMPACT_UI.font_xs,
+            color=ft.Colors.ON_SURFACE_VARIANT,
+        )
+        self.content = ft.Column(expand=True, spacing=COMPACT_UI.space_md)
+        self.header_title = ft.Text(
+            "Медиатека",
+            size=COMPACT_UI.font_title,
+            weight=ft.FontWeight.BOLD,
+            color=ft.Colors.ON_SURFACE,
+        )
+        self.header_subtitle = ft.Text(
+            "Локальная музыкальная библиотека",
+            size=COMPACT_UI.font_xs,
+            color=ft.Colors.ON_SURFACE_VARIANT,
+        )
         self.theme_button = ft.IconButton(
             icon=theme_mode_icon(self.settings.theme_mode),
+            icon_size=COMPACT_UI.action_icon_size,
+            padding=COMPACT_UI.space_xs,
+            visual_density=ft.VisualDensity.COMPACT,
             tooltip=self._theme_tooltip(),
             on_click=self._cycle_theme_mode,
         )
@@ -74,19 +94,23 @@ class DJMakerUI:
 
         header = ft.Container(
             bgcolor=ft.Colors.SURFACE_CONTAINER_LOWEST,
-            padding=ft.Padding.symmetric(horizontal=20, vertical=14),
+            padding=ft.Padding.symmetric(
+                horizontal=COMPACT_UI.header_horizontal_padding,
+                vertical=COMPACT_UI.header_vertical_padding,
+            ),
             content=ft.Row(
                 controls=[
                     ft.Column(
                         controls=[self.header_title, self.header_subtitle],
                         spacing=1,
-                        width=300,
+                        width=200,
                     ),
                     self.search,
                     self.busy,
                     self.theme_button,
                 ],
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                spacing=COMPACT_UI.space_md,
             ),
         )
 
@@ -97,18 +121,21 @@ class DJMakerUI:
                 ft.Container(
                     content=self.content,
                     expand=True,
-                    padding=20,
+                    padding=COMPACT_UI.content_padding,
                 ),
                 ft.Divider(height=1, color=ft.Colors.OUTLINE_VARIANT),
                 ft.Container(
                     bgcolor=ft.Colors.SURFACE_CONTAINER_LOW,
-                    padding=ft.Padding.symmetric(horizontal=20, vertical=8),
+                    padding=ft.Padding.symmetric(
+                        horizontal=COMPACT_UI.status_horizontal_padding,
+                        vertical=COMPACT_UI.status_vertical_padding,
+                    ),
                     content=ft.Row(
                         controls=[
-                            ft.Icon(ft.Icons.INFO_OUTLINE, size=16),
+                            ft.Icon(ft.Icons.INFO_OUTLINE, size=12),
                             self.status,
                         ],
-                        spacing=8,
+                        spacing=COMPACT_UI.space_sm,
                     ),
                 ),
             ],
@@ -135,33 +162,51 @@ class DJMakerUI:
             selected_index=0,
             extended=True,
             label_type=ft.NavigationRailLabelType.NONE,
-            min_width=72,
-            min_extended_width=238,
+            min_width=COMPACT_UI.nav_min_width,
+            min_extended_width=COMPACT_UI.nav_extended_width,
             use_indicator=True,
             group_alignment=-0.88,
             pin_trailing_to_bottom=True,
             bgcolor=ft.Colors.SURFACE_CONTAINER_LOW,
+            selected_label_text_style=ft.TextStyle(
+                size=COMPACT_UI.font_sm,
+                color=ft.Colors.PRIMARY,
+                weight=ft.FontWeight.BOLD,
+            ),
+            unselected_label_text_style=ft.TextStyle(
+                size=COMPACT_UI.font_sm,
+                color=ft.Colors.ON_SURFACE,
+            ),
             leading=ft.Container(
-                padding=ft.Padding.only(left=18, right=12, top=18, bottom=12),
+                padding=ft.Padding.only(left=9, right=6, top=9, bottom=6),
                 content=ft.Row(
                     controls=[
-                        ft.Icon(ft.Icons.HEADPHONES, size=30, color=ft.Colors.PRIMARY),
+                        ft.Icon(ft.Icons.HEADPHONES, size=20, color=ft.Colors.PRIMARY),
                         ft.Column(
                             controls=[
-                                ft.Text("DJMAKER", size=20, weight=ft.FontWeight.BOLD),
-                                ft.Text("Music Library", size=11),
+                                ft.Text(
+                                    "DJMAKER",
+                                    size=COMPACT_UI.font_lg,
+                                    weight=ft.FontWeight.BOLD,
+                                ),
+                                ft.Text(
+                                    "Music Library",
+                                    size=COMPACT_UI.font_micro,
+                                    color=ft.Colors.ON_SURFACE_VARIANT,
+                                ),
                             ],
                             spacing=0,
                         ),
                     ],
-                    spacing=10,
+                    spacing=COMPACT_UI.space_sm,
                 ),
             ),
             trailing=ft.Container(
-                padding=ft.Padding.only(left=12, right=12, bottom=16),
+                padding=ft.Padding.only(left=6, right=6, bottom=8),
                 content=ft.Text(
                     "Windows · macOS",
-                    size=10,
+                    size=COMPACT_UI.font_micro,
+                    color=ft.Colors.ON_SURFACE_VARIANT,
                     text_align=ft.TextAlign.CENTER,
                 ),
             ),
@@ -246,11 +291,15 @@ class DJMakerUI:
         self.page.update()
 
     @staticmethod
-    def _surface_card(content: ft.Control, *, padding: int = 14) -> ft.Container:
+    def _surface_card(
+        content: ft.Control,
+        *,
+        padding: int = COMPACT_UI.card_padding,
+    ) -> ft.Container:
         """Возвращает стандартную карточку для экранов приложения."""
         return ft.Container(
             bgcolor=ft.Colors.SURFACE_CONTAINER_LOW,
-            border_radius=14,
+            border_radius=COMPACT_UI.radius,
             padding=padding,
             content=content,
         )
@@ -259,14 +308,19 @@ class DJMakerUI:
         return self._surface_card(
             ft.Column(
                 controls=[
-                    ft.Icon(icon, size=42, color=ft.Colors.PRIMARY),
-                    ft.Text(title, size=18, weight=ft.FontWeight.BOLD),
-                    ft.Text(description, text_align=ft.TextAlign.CENTER),
+                    ft.Icon(icon, size=24, color=ft.Colors.PRIMARY),
+                    ft.Text(title, size=COMPACT_UI.font_lg, weight=ft.FontWeight.BOLD),
+                    ft.Text(
+                        description,
+                        size=COMPACT_UI.font_sm,
+                        color=ft.Colors.ON_SURFACE_VARIANT,
+                        text_align=ft.TextAlign.CENTER,
+                    ),
                 ],
                 horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                spacing=8,
+                spacing=COMPACT_UI.space_sm,
             ),
-            padding=28,
+            padding=14,
         )
 
     async def _on_search(self, _: object) -> None:
@@ -283,7 +337,11 @@ class DJMakerUI:
 
         actions = ft.Row(
             controls=[
-                ft.Text(f"Показано треков: {len(tracks)}", weight=ft.FontWeight.BOLD),
+                ft.Text(
+                    f"Показано треков: {len(tracks)}",
+                    size=COMPACT_UI.font_sm,
+                    weight=ft.FontWeight.BOLD,
+                ),
                 ft.Button(
                     content="Обновить",
                     icon=ft.Icons.REFRESH,
@@ -304,7 +362,11 @@ class DJMakerUI:
         else:
             items.extend(self._track_row(track) for track in tracks)
 
-        listing = ft.ListView(controls=items, expand=True, spacing=8)
+        listing = ft.ListView(
+            controls=items,
+            expand=True,
+            spacing=COMPACT_UI.space_sm,
+        )
         self._replace_content(
             "Медиатека",
             "Поиск, теги и организация локальной музыкальной коллекции",
@@ -322,41 +384,70 @@ class DJMakerUI:
             ft.Row(
                 controls=[
                     ft.Container(
-                        width=42,
-                        height=42,
-                        border_radius=10,
+                        width=COMPACT_UI.track_icon_box,
+                        height=COMPACT_UI.track_icon_box,
+                        border_radius=6,
                         bgcolor=ft.Colors.PRIMARY_CONTAINER,
                         alignment=ft.Alignment.CENTER,
-                        content=ft.Icon(ft.Icons.MUSIC_NOTE, color=ft.Colors.ON_PRIMARY_CONTAINER),
+                        content=ft.Icon(
+                            ft.Icons.MUSIC_NOTE,
+                            size=COMPACT_UI.track_icon_size,
+                            color=ft.Colors.ON_PRIMARY_CONTAINER,
+                        ),
                     ),
                     ft.Column(
                         controls=[
-                            ft.Text(title, weight=ft.FontWeight.BOLD, size=15),
-                            ft.Text(f"{artist} · {album}", size=12),
-                            ft.Text(str(track.path), size=10),
+                            ft.Text(
+                                title,
+                                weight=ft.FontWeight.BOLD,
+                                size=COMPACT_UI.font_md,
+                            ),
+                            ft.Text(
+                                f"{artist} · {album}",
+                                size=COMPACT_UI.font_xs,
+                                color=ft.Colors.ON_SURFACE_VARIANT,
+                            ),
+                            ft.Text(
+                                str(track.path),
+                                size=COMPACT_UI.font_micro,
+                                color=ft.Colors.ON_SURFACE_VARIANT,
+                            ),
                         ],
                         expand=True,
                         spacing=2,
                     ),
-                    ft.Text(f"{duration}  ·  {bitrate}", size=12),
+                    ft.Text(
+                        f"{duration}  ·  {bitrate}",
+                        size=COMPACT_UI.font_xs,
+                        color=ft.Colors.ON_SURFACE_VARIANT,
+                    ),
                     ft.IconButton(
                         icon=ft.Icons.EDIT_OUTLINED,
+                        icon_size=COMPACT_UI.action_icon_size,
+                        padding=COMPACT_UI.space_xs,
+                        visual_density=ft.VisualDensity.COMPACT,
                         tooltip="Редактировать теги",
                         on_click=lambda _, track_id=track.id: self._open_tag_editor(track_id),
                     ),
                     ft.IconButton(
                         icon=ft.Icons.DRIVE_FILE_MOVE_OUTLINED,
+                        icon_size=COMPACT_UI.action_icon_size,
+                        padding=COMPACT_UI.space_xs,
+                        visual_density=ft.VisualDensity.COMPACT,
                         tooltip="Организовать файл",
                         on_click=lambda _, track_id=track.id: self._open_organizer(track_id),
                     ),
                     ft.IconButton(
                         icon=ft.Icons.SEARCH,
+                        icon_size=COMPACT_UI.action_icon_size,
+                        padding=COMPACT_UI.space_xs,
+                        visual_density=ft.VisualDensity.COMPACT,
                         tooltip="Найти метаданные",
                         on_click=lambda _, track_id=track.id: self._start_metadata_search(track_id),
                     ),
                 ],
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                spacing=10,
+                spacing=COMPACT_UI.space_sm,
             )
         )
 
@@ -399,7 +490,7 @@ class DJMakerUI:
                             ft.Column(
                                 controls=[
                                     ft.Text(root.name or str(root), weight=ft.FontWeight.BOLD),
-                                    ft.Text(str(root), size=11),
+                                    ft.Text(str(root), size=COMPACT_UI.font_xs),
                                 ],
                                 expand=True,
                                 spacing=2,
@@ -487,9 +578,9 @@ class DJMakerUI:
                     f"Группа {index} · {len(group.tracks)} файлов · {self._format_size(total_size)}",
                     weight=ft.FontWeight.BOLD,
                 ),
-                ft.Text(f"SHA-256: {group.file_hash}", size=10),
+                ft.Text(f"SHA-256: {group.file_hash}", size=COMPACT_UI.font_micro),
             ]
-            rows.extend(ft.Text(f"• {track.path}", size=12) for track in group.tracks)
+            rows.extend(ft.Text(f"• {track.path}", size=COMPACT_UI.font_xs) for track in group.tracks)
             controls.append(self._surface_card(ft.Column(controls=rows, spacing=5)))
 
         self._replace_content(
@@ -519,12 +610,12 @@ class DJMakerUI:
                             ft.Column(
                                 controls=[
                                     ft.Text(provider.display_name, weight=ft.FontWeight.BOLD),
-                                    ft.Text(provider.provider_id, size=11),
+                                    ft.Text(provider.provider_id, size=COMPACT_UI.font_xs),
                                 ],
                                 expand=True,
                                 spacing=1,
                             ),
-                            ft.Text("Подключён", size=11),
+                            ft.Text("Подключён", size=COMPACT_UI.font_xs),
                         ]
                     )
                 )
@@ -556,16 +647,16 @@ class DJMakerUI:
             self._surface_card(
                 ft.Row(
                     controls=[
-                        ft.Icon(icon, size=28, color=ft.Colors.PRIMARY),
+                        ft.Icon(icon, size=18, color=ft.Colors.PRIMARY),
                         ft.Column(
                             controls=[
                                 ft.Text(title, weight=ft.FontWeight.BOLD),
-                                ft.Text(description, size=12),
+                                ft.Text(description, size=COMPACT_UI.font_xs),
                             ],
                             expand=True,
                             spacing=2,
                         ),
-                        ft.Text("Запланировано", size=11),
+                        ft.Text("Запланировано", size=COMPACT_UI.font_xs),
                     ]
                 )
             )
@@ -582,6 +673,8 @@ class DJMakerUI:
         self._set_navigation_index(5)
         mode_dropdown = ft.Dropdown(
             label="Режим интерфейса",
+            dense=True,
+            text_size=COMPACT_UI.font_sm,
             value=self.settings.theme_mode,
             options=[
                 ft.DropdownOption(key=mode, text=THEME_MODE_LABELS[mode])
@@ -591,6 +684,8 @@ class DJMakerUI:
         )
         palette_dropdown = ft.Dropdown(
             label="Цветовая схема",
+            dense=True,
+            text_size=COMPACT_UI.font_sm,
             value=self.settings.theme_palette,
             options=[
                 ft.DropdownOption(key=palette.key, text=palette.title)
@@ -605,18 +700,18 @@ class DJMakerUI:
                     ft.Row(
                         controls=[
                             ft.Icon(ft.Icons.PALETTE_OUTLINED, color=ft.Colors.PRIMARY),
-                            ft.Text("Оформление", size=17, weight=ft.FontWeight.BOLD),
+                            ft.Text("Оформление", size=COMPACT_UI.font_lg, weight=ft.FontWeight.BOLD),
                         ]
                     ),
                     ft.Text(
                         "Системный режим автоматически следует настройке Windows или macOS. "
                         "Цветовая схема применяется одновременно к светлой и тёмной теме.",
-                        size=12,
+                        size=COMPACT_UI.font_xs,
                     ),
                     mode_dropdown,
                     palette_dropdown,
                 ],
-                spacing=10,
+                spacing=5,
             )
         )
 
@@ -626,7 +721,7 @@ class DJMakerUI:
                     ft.Row(
                         controls=[
                             ft.Icon(ft.Icons.STORAGE_OUTLINED, color=ft.Colors.PRIMARY),
-                            ft.Text("Локальные данные", size=17, weight=ft.FontWeight.BOLD),
+                            ft.Text("Локальные данные", size=COMPACT_UI.font_lg, weight=ft.FontWeight.BOLD),
                         ]
                     ),
                     self._path_setting("Каталог данных", self.paths.data_dir),
@@ -634,7 +729,7 @@ class DJMakerUI:
                     self._path_setting("Настройки", self.paths.settings_file),
                     self._path_setting("Лог", self.paths.log_file),
                 ],
-                spacing=8,
+                spacing=4,
             )
         )
 
@@ -644,13 +739,13 @@ class DJMakerUI:
                     ft.Row(
                         controls=[
                             ft.Icon(ft.Icons.DRIVE_FILE_MOVE_OUTLINED, color=ft.Colors.PRIMARY),
-                            ft.Text("Организация файлов", size=17, weight=ft.FontWeight.BOLD),
+                            ft.Text("Организация файлов", size=COMPACT_UI.font_lg, weight=ft.FontWeight.BOLD),
                         ]
                     ),
-                    ft.Text("Шаблон по умолчанию", size=11),
+                    ft.Text("Шаблон по умолчанию", size=COMPACT_UI.font_xs),
                     ft.Text(DEFAULT_ORGANIZE_TEMPLATE),
                 ],
-                spacing=6,
+                spacing=3,
             )
         )
 
@@ -666,8 +761,8 @@ class DJMakerUI:
     def _path_setting(label: str, path: Path) -> ft.Control:
         return ft.Column(
             controls=[
-                ft.Text(label, size=10),
-                ft.Text(str(path), selectable=True, size=12),
+                ft.Text(label, size=COMPACT_UI.font_micro),
+                ft.Text(str(path), selectable=True, size=COMPACT_UI.font_xs),
             ],
             spacing=0,
         )
@@ -727,16 +822,16 @@ class DJMakerUI:
             self._notify("Трек не найден")
             return
         metadata = track.metadata
-        title = ft.TextField(label="Title", value=metadata.title)
-        artist = ft.TextField(label="Artist", value=metadata.artist)
-        album = ft.TextField(label="Album", value=metadata.album)
-        album_artist = ft.TextField(label="Album Artist", value=metadata.album_artist)
-        genre = ft.TextField(label="Genre", value=metadata.genre)
-        year = ft.TextField(label="Year", value=metadata.year)
-        track_no = ft.TextField(label="Track", value=str(metadata.track_number or ""))
-        disc_no = ft.TextField(label="Disc", value=str(metadata.disc_number or ""))
-        bpm = ft.TextField(label="BPM", value=str(metadata.bpm or ""))
-        musical_key = ft.TextField(label="Key", value=metadata.musical_key)
+        title = ft.TextField(label="Title", dense=True, text_size=COMPACT_UI.font_sm, value=metadata.title)
+        artist = ft.TextField(label="Artist", dense=True, text_size=COMPACT_UI.font_sm, value=metadata.artist)
+        album = ft.TextField(label="Album", dense=True, text_size=COMPACT_UI.font_sm, value=metadata.album)
+        album_artist = ft.TextField(label="Album Artist", dense=True, text_size=COMPACT_UI.font_sm, value=metadata.album_artist)
+        genre = ft.TextField(label="Genre", dense=True, text_size=COMPACT_UI.font_sm, value=metadata.genre)
+        year = ft.TextField(label="Year", dense=True, text_size=COMPACT_UI.font_sm, value=metadata.year)
+        track_no = ft.TextField(label="Track", dense=True, text_size=COMPACT_UI.font_sm, value=str(metadata.track_number or ""))
+        disc_no = ft.TextField(label="Disc", dense=True, text_size=COMPACT_UI.font_sm, value=str(metadata.disc_number or ""))
+        bpm = ft.TextField(label="BPM", dense=True, text_size=COMPACT_UI.font_sm, value=str(metadata.bpm or ""))
+        musical_key = ft.TextField(label="Key", dense=True, text_size=COMPACT_UI.font_sm, value=metadata.musical_key)
 
         async def save(_: object) -> None:
             try:
@@ -793,8 +888,18 @@ class DJMakerUI:
         self.page.show_dialog(dialog)
 
     def _open_organizer(self, track_id: int) -> None:
-        destination = ft.TextField(label="Корневая папка назначения", expand=True)
-        template = ft.TextField(label="Шаблон", value=DEFAULT_ORGANIZE_TEMPLATE)
+        destination = ft.TextField(
+            label="Корневая папка назначения",
+            expand=True,
+            dense=True,
+            text_size=COMPACT_UI.font_sm,
+        )
+        template = ft.TextField(
+            label="Шаблон",
+            value=DEFAULT_ORGANIZE_TEMPLATE,
+            dense=True,
+            text_size=COMPACT_UI.font_sm,
+        )
 
         async def choose(_: object) -> None:
             try:
@@ -904,7 +1009,7 @@ class DJMakerUI:
                             ft.Button(content="Применить", on_click=apply),
                         ]
                     ),
-                    padding=10,
+                    padding=5,
                 )
             )
 
