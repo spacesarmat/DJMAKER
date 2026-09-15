@@ -130,11 +130,36 @@ class LibraryService:
         track_id: int,
         task: TaskControl | None = None,
     ) -> TrackRecord:
-        """Анализирует один трек и сохраняет результат в SQLite."""
+        """Анализирует трек, пишет BPM/Key в файл и синхронизирует SQLite."""
         if task is not None:
             task.checkpoint()
         track = self._require_track(track_id)
         analysis = self.analyzer.analyze(track.path, task=task)
+
+        # После этой контрольной точки запись тегов и синхронизация БД выполняются
+        # как единый участок: пауза не должна оставить уже изменённый файл со
+        # старым hash/mtime в медиатеке.
+        if task is not None:
+            task.checkpoint()
+        self.tags.write_analysis(track.path, analysis)
+        inspected, file_hash, stat = self.scanner.inspect_and_hash(track.path)
+
+        key_tag = self.tags.analysis_key_tag_value(analysis)
+        if analysis.bpm is not None and inspected.metadata.bpm is None:
+            inspected.metadata.bpm = analysis.bpm
+        if key_tag and not inspected.metadata.musical_key:
+            inspected.metadata.musical_key = key_tag
+
+        self.database.update_after_file_change(
+            track_id,
+            new_path=track.path,
+            root=track.root_path,
+            size=stat.st_size,
+            mtime_ns=stat.st_mtime_ns,
+            file_hash=file_hash,
+            metadata=inspected.metadata,
+            technical=inspected.technical,
+        )
         self.database.save_audio_analysis(track_id, analysis)
         return self._require_track(track_id)
 

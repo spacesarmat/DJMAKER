@@ -9,6 +9,8 @@ from typing import Any
 from mutagen import File, MutagenError
 from mutagen.apev2 import APEv2File
 from mutagen.asf import ASF
+from mutagen.easymp4 import EasyMP4Tags
+from mutagen.flac import FLAC
 from mutagen.id3 import (
     ID3,
     TALB,
@@ -24,9 +26,9 @@ from mutagen.id3 import (
 )
 from mutagen.mp4 import MP4, MP4Cover, MP4FreeForm
 from mutagen.ogg import OggFileType
-from mutagen.flac import FLAC
 
 from djmaker.domain.models import (
+    AudioAnalysis,
     AudioMetadata,
     AudioTechnicalInfo,
     EmbeddedArtwork,
@@ -35,6 +37,11 @@ from djmaker.domain.models import (
 
 
 LOGGER = logging.getLogger(__name__)
+
+# Mutagen EasyMP4 не регистрирует Initial Key по умолчанию. Регистрируем
+# стандартный iTunes freeform atom, чтобы обычное inspect() сразу видел Key,
+# записанный анализатором DJMAKER.
+EasyMP4Tags.RegisterFreeformKey("initialkey", "INITIALKEY")
 
 
 class AudioTagError(RuntimeError):
@@ -165,6 +172,65 @@ class AudioTagService:
             mime_type = ""
         return EmbeddedArtwork(data=data, mime_type=mime_type)
 
+    def write_analysis(self, path: Path, analysis: AudioAnalysis) -> None:
+        """Записывает рассчитанные BPM и Key, не затрагивая остальные теги."""
+        bpm = analysis.bpm
+        musical_key = self.analysis_key_tag_value(analysis)
+        if bpm is None and not musical_key:
+            return
+
+        try:
+            audio = File(path)
+        except (MutagenError, OSError) as exc:
+            raise AudioTagError(
+                f"Не удалось открыть {path} для записи BPM/Key: {exc}"
+            ) from exc
+
+        if audio is None:
+            raise AudioTagError(f"Формат файла не распознан: {path}")
+
+        try:
+            if isinstance(audio, MP4):
+                self._write_analysis_mp4(audio, bpm, musical_key)
+            elif isinstance(audio, ASF):
+                self._write_analysis_asf(audio, bpm, musical_key)
+            elif isinstance(audio, (FLAC, OggFileType)):
+                self._write_analysis_mapping(
+                    audio, bpm, musical_key, ape_style=False
+                )
+            elif isinstance(audio, APEv2File):
+                self._write_analysis_mapping(
+                    audio, bpm, musical_key, ape_style=True
+                )
+            elif isinstance(getattr(audio, "tags", None), ID3):
+                self._write_analysis_id3(audio, bpm, musical_key)
+            else:
+                self._ensure_tags(audio)
+                if isinstance(getattr(audio, "tags", None), ID3):
+                    self._write_analysis_id3(audio, bpm, musical_key)
+                else:
+                    raise UnsupportedTagWriteError(
+                        "Запись BPM/Key для "
+                        f"{type(audio).__name__} пока не реализована"
+                    )
+        except UnsupportedTagWriteError:
+            raise
+        except (MutagenError, OSError, KeyError, ValueError, TypeError) as exc:
+            raise AudioTagError(
+                f"Не удалось записать BPM/Key в {path}: {exc}"
+            ) from exc
+
+    @staticmethod
+    def analysis_key_tag_value(analysis: AudioAnalysis) -> str:
+        """Возвращает человекочитаемую тональность для стандартного Key-тега."""
+        key = analysis.musical_key.strip()
+        scale = analysis.scale.strip().lower()
+        if not key:
+            return ""
+        if scale in {"major", "minor"}:
+            return f"{key} {scale}"
+        return key
+
     def write(self, path: Path, metadata: AudioMetadata) -> None:
         """Записывает основные теги, используя нативный формат контейнера."""
         try:
@@ -203,6 +269,83 @@ class AudioTagService:
     def _ensure_tags(audio: Any) -> None:
         if getattr(audio, "tags", None) is None:
             audio.add_tags()
+
+    def _write_analysis_mp4(
+        self,
+        audio: MP4,
+        bpm: float | None,
+        musical_key: str,
+    ) -> None:
+        self._ensure_tags(audio)
+        tags = audio.tags
+        if tags is None:
+            raise AudioTagError("MP4-контейнер не создал таблицу тегов")
+
+        if bpm is not None:
+            tags["tmpo"] = [int(round(bpm))]
+        if musical_key:
+            tags["----:com.apple.iTunes:INITIALKEY"] = [
+                MP4FreeForm(musical_key.encode("utf-8"))
+            ]
+        audio.save()
+
+    def _write_analysis_asf(
+        self,
+        audio: ASF,
+        bpm: float | None,
+        musical_key: str,
+    ) -> None:
+        self._ensure_tags(audio)
+        tags = audio.tags
+        if tags is None:
+            raise AudioTagError("ASF-контейнер не создал таблицу тегов")
+
+        if bpm is not None:
+            tags["WM/BeatsPerMinute"] = [self._optional_number(bpm)]
+        if musical_key:
+            tags["WM/InitialKey"] = [musical_key]
+        audio.save()
+
+    def _write_analysis_mapping(
+        self,
+        audio: Any,
+        bpm: float | None,
+        musical_key: str,
+        *,
+        ape_style: bool,
+    ) -> None:
+        self._ensure_tags(audio)
+        tags = audio.tags
+        if tags is None:
+            raise AudioTagError("Контейнер не создал таблицу тегов")
+
+        if bpm is not None:
+            tags["BPM" if ape_style else "bpm"] = self._optional_number(bpm)
+        if musical_key:
+            tags["InitialKey" if ape_style else "initialkey"] = musical_key
+        audio.save()
+
+    def _write_analysis_id3(
+        self,
+        audio: Any,
+        bpm: float | None,
+        musical_key: str,
+    ) -> None:
+        self._ensure_tags(audio)
+        tags = audio.tags
+        if not isinstance(tags, ID3):
+            raise AudioTagError("Ожидались ID3-теги")
+
+        if bpm is not None:
+            self._replace_id3(
+                tags,
+                "TBPM",
+                TBPM,
+                self._optional_number(bpm) or "",
+            )
+        if musical_key:
+            self._replace_id3(tags, "TKEY", TKEY, musical_key)
+        audio.save()
 
     def _write_mp4(self, audio: MP4, metadata: AudioMetadata) -> None:
         self._ensure_tags(audio)
