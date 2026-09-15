@@ -211,6 +211,32 @@ class LibraryDatabaseTests(unittest.TestCase):
         assert updated is not None
         self.assertIsNone(updated.waveform)
 
+    def test_reset_clears_library_and_keeps_schema_ready(self) -> None:
+        self._insert("one.mp3", "abc")
+        track = self.db.list_tracks()[0]
+        self.db.save_audio_analysis(track.id, AudioAnalysis(bpm=128.0))
+        self.db.save_waveform_analysis(
+            track.id,
+            WaveformAnalysis(peaks=(0.25, 0.75)),
+        )
+        self.db.add_root(self.root)
+
+        self.db.reset()
+
+        self.assertEqual([], self.db.list_tracks())
+        self.assertEqual([], self.db.list_roots())
+        self.assertEqual((0, 0), self.db.analysis_counts())
+        self.assertEqual((0, 0), self.db.waveform_counts())
+        with self.db.connection() as conn:
+            self.assertEqual(
+                4,
+                conn.execute("PRAGMA user_version").fetchone()[0],
+            )
+
+        self._insert("after-reset.mp3", "new-hash")
+        recreated = self.db.list_tracks()[0]
+        self.assertEqual(1, recreated.id)
+
     def test_embedded_artwork_path_is_stored_separately_from_online_url(self) -> None:
         path = self.root / "cover.mp3"
         path.write_bytes(b"audio")

@@ -2863,6 +2863,40 @@ class DJMakerUI:
                     self._path_setting("База данных", self.paths.database),
                     self._path_setting("Настройки", self.paths.settings_file),
                     self._path_setting("Лог", self.paths.log_file),
+                    ft.Divider(height=1, color=ft.Colors.OUTLINE_VARIANT),
+                    ft.Row(
+                        controls=[
+                            ft.Icon(
+                                ft.Icons.WARNING_AMBER,
+                                color=ft.Colors.ERROR,
+                                size=COMPACT_UI.action_icon_size,
+                            ),
+                            ft.Column(
+                                controls=[
+                                    ft.Text(
+                                        "Обнуление медиатеки",
+                                        size=COMPACT_UI.font_sm,
+                                        weight=ft.FontWeight.BOLD,
+                                    ),
+                                    ft.Text(
+                                        "Удаляет треки, папки, ошибки сканирования и "
+                                        "результаты анализа только из SQLite.",
+                                        size=COMPACT_UI.font_micro,
+                                        color=ft.Colors.ON_SURFACE_VARIANT,
+                                    ),
+                                ],
+                                spacing=0,
+                                expand=True,
+                            ),
+                            ft.Button(
+                                content="Обнулить БД",
+                                icon=ft.Icons.DELETE_FOREVER_OUTLINED,
+                                on_click=self._open_database_reset_dialog,
+                            ),
+                        ],
+                        spacing=COMPACT_UI.space_sm,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    ),
                 ],
                 spacing=4,
             )
@@ -2901,6 +2935,111 @@ class DJMakerUI:
             f"Тема: {THEME_MODE_LABELS[self.settings.theme_mode]} · {palette_title(self.settings.theme_palette)}",
             settings_list,
         )
+
+    def _open_database_reset_dialog(self, _: object) -> None:
+        """Запрашивает подтверждение полного сброса SQLite-медиатеки."""
+        if self.tasks.active_count() > 0:
+            self._notify(
+                "Сначала остановите или отмените активные задачи перед обнулением БД"
+            )
+            return
+
+        async def execute(_: object) -> None:
+            if self.tasks.active_count() > 0:
+                self._notify(
+                    "Обнуление отменено: появились активные фоновые задачи"
+                )
+                return
+
+            self.page.pop_dialog()
+            self._set_busy(True, "Обнуление базы данных...")
+            try:
+                if self.audio is not None:
+                    try:
+                        await self.audio.pause()
+                        await self.audio.seek(ft.Duration(milliseconds=0))
+                    except Exception:
+                        LOGGER.debug(
+                            "Не удалось остановить плеер перед сбросом БД",
+                            exc_info=True,
+                        )
+
+                await self.workers.run(self.service.reset_library)
+            except Exception as exc:
+                LOGGER.exception("Ошибка обнуления БД")
+                self._notify(f"Не удалось обнулить БД: {exc}")
+            else:
+                self._clear_library_runtime_state()
+                self._notify("База данных обнулена. Музыкальные файлы не изменялись")
+                self.show_library()
+            finally:
+                self._set_busy(False)
+
+        dialog = ft.AlertDialog(
+            modal=True,
+            title=ft.Text("Обнулить базу данных?"),
+            content=ft.Column(
+                controls=[
+                    ft.Text(
+                        "Будут удалены все записи медиатеки: музыкальные папки, "
+                        "индекс треков, результаты BPM/Key, waveform, ссылки на "
+                        "обложки и журнал ошибок сканирования."
+                    ),
+                    ft.Text(
+                        "Музыкальные файлы, их теги, настройки приложения, лог и "
+                        "файлы кэша обложек удаляться не будут.",
+                        color=ft.Colors.ON_SURFACE_VARIANT,
+                    ),
+                    ft.Text(
+                        str(self.paths.database),
+                        selectable=True,
+                        size=COMPACT_UI.font_xs,
+                        color=ft.Colors.ERROR,
+                    ),
+                ],
+                tight=True,
+                spacing=COMPACT_UI.space_sm,
+            ),
+            actions=[
+                ft.Button(
+                    content="Отмена",
+                    on_click=lambda _: self.page.pop_dialog(),
+                ),
+                ft.Button(
+                    content="Обнулить БД",
+                    icon=ft.Icons.DELETE_FOREVER_OUTLINED,
+                    on_click=execute,
+                ),
+            ],
+        )
+        self.page.show_dialog(dialog)
+
+    def _clear_library_runtime_state(self) -> None:
+        """Сбрасывает UI-состояние, связанное с удалёнными записями БД."""
+        self._player_request_revision += 1
+        self._selected_track_id = None
+        self._player_track_id = None
+        self._player_track_path = None
+        self._player_position_ms = 0
+        self._player_duration_ms = 0
+        self._player_state = fta.AudioState.STOPPED
+        self._player_switching = False
+        self._player_load_event = None
+        self.player_title.value = ""
+        self.player_position.value = "00:00 / 00:00"
+        self.player_progress.value = 0.0
+        self.player_play_button.icon = ft.Icons.PLAY_ARROW
+        self.player_bar.visible = False
+
+        self.search.value = ""
+        self.search_clear_button.visible = False
+        self._search_revision += 1
+        self._waveform_views.clear()
+        self._track_row_cards.clear()
+        self._library_track_indices.clear()
+        self._library_list = None
+        self._library_viewport_extent = 0.0
+        self._library_max_scroll_extent = 0.0
 
     @staticmethod
     def _path_setting(label: str, path: Path) -> ft.Control:

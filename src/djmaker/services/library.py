@@ -64,6 +64,10 @@ class LibraryService:
         """Возвращает треки медиатеки."""
         return self.database.list_tracks(search=search, limit=limit)
 
+    def reset_library(self) -> None:
+        """Обнуляет SQLite-медиатеку, не затрагивая музыкальные файлы."""
+        self.database.reset()
+
     def track(self, track_id: int) -> TrackRecord:
         """Возвращает один трек или поднимает понятную ошибку."""
         return self._require_track(track_id)

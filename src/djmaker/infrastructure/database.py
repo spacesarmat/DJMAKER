@@ -61,6 +61,23 @@ class LibraryDatabase:
         except sqlite3.Error as exc:
             raise DatabaseError(f"Не удалось инициализировать БД: {exc}") from exc
 
+    def reset(self) -> None:
+        """Удаляет данные медиатеки, сохраняя актуальную схему SQLite."""
+        try:
+            with self.connection() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                conn.execute("DELETE FROM scan_errors")
+                conn.execute("DELETE FROM tracks")
+                conn.execute("DELETE FROM roots")
+                conn.execute(
+                    "DELETE FROM sqlite_sequence "
+                    "WHERE name IN ('scan_errors', 'tracks', 'roots')"
+                )
+                conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+                conn.commit()
+        except sqlite3.Error as exc:
+            raise DatabaseError(f"Не удалось обнулить БД: {exc}") from exc
+
     @contextmanager
     def connection(self) -> Iterator[sqlite3.Connection]:
         """Открывает настроенное SQLite-соединение и гарантирует его закрытие."""
