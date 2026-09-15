@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import flet as ft
@@ -18,6 +19,15 @@ from djmaker.runtime.dependencies import (
 )
 from djmaker.services.audio_analysis import recommended_analysis_concurrency
 from djmaker.services.library import LibraryService
+from djmaker.services.tasks import (
+    ManagedTask,
+    TaskCancelled,
+    TaskKind,
+    TaskManager,
+    TaskPaused,
+    TaskSnapshot,
+    TaskStatus,
+)
 from djmaker.services.workers import BackgroundWorkers
 from djmaker.settings import AppSettings, SettingsStore, THEME_MODES
 from djmaker.ui.density import COMPACT_UI
@@ -33,6 +43,19 @@ from djmaker.ui.theme import (
 LOGGER = logging.getLogger(__name__)
 
 
+@dataclass(slots=True)
+class _AudioTaskContext:
+    force: bool
+    pending_ids: set[int] | None = None
+    labels: dict[int, str] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class _BatchTaskContext:
+    pending_ids: set[int]
+    labels: dict[int, str] = field(default_factory=dict)
+
+
 class DJMakerUI:
     """Связывает Flet-контролы с сервисным слоем приложения."""
 
@@ -45,6 +68,7 @@ class DJMakerUI:
         settings_store: SettingsStore,
         settings: AppSettings,
         runtime: RuntimeDependencies,
+        tasks: TaskManager,
     ) -> None:
         self.page = page
         self.service = service
@@ -53,7 +77,11 @@ class DJMakerUI:
         self.settings_store = settings_store
         self.settings = settings
         self.runtime = runtime
+        self.tasks = tasks
         self.runtime_report = runtime.probe()
+        self._audio_task_contexts: dict[str, _AudioTaskContext] = {}
+        self._scan_task_paths: dict[str, Path] = {}
+        self._artwork_task_contexts: dict[str, _BatchTaskContext] = {}
 
         self.search = ft.TextField(
             hint_text="Поиск в медиатеке",
@@ -80,7 +108,19 @@ class DJMakerUI:
             color=ft.Colors.ON_SURFACE_VARIANT,
             visible=False,
         )
-        self._analysis_running = False
+        self.task_count_text = ft.Text(
+            "Задачи: 0",
+            size=COMPACT_UI.font_micro,
+            color=ft.Colors.ON_SURFACE_VARIANT,
+        )
+        self.task_button = ft.IconButton(
+            icon=ft.Icons.PENDING_ACTIONS,
+            icon_size=COMPACT_UI.action_icon_size,
+            padding=COMPACT_UI.space_xs,
+            visual_density=ft.VisualDensity.COMPACT,
+            tooltip="Текущие задачи",
+            on_click=lambda _: self.show_tasks(),
+        )
         self.content = ft.Column(expand=True, spacing=COMPACT_UI.space_md)
         self.theme_button = ft.IconButton(
             icon=theme_mode_icon(self.settings.theme_mode),
@@ -120,6 +160,8 @@ class DJMakerUI:
                             ft.Icon(ft.Icons.INFO_OUTLINE, size=12),
                             self.status,
                             ft.Container(expand=True),
+                            self.task_button,
+                            self.task_count_text,
                             self.analysis_progress_text,
                             self.analysis_progress,
                         ],
@@ -225,6 +267,11 @@ class DJMakerUI:
                     label="Аудио-модули",
                 ),
                 ft.NavigationRailDestination(
+                    icon=ft.Icons.PENDING_ACTIONS,
+                    selected_icon=ft.Icons.TASK_ALT,
+                    label="Задачи",
+                ),
+                ft.NavigationRailDestination(
                     icon=ft.Icons.SETTINGS_OUTLINED,
                     selected_icon=ft.Icons.SETTINGS,
                     label="Настройки",
@@ -242,6 +289,7 @@ class DJMakerUI:
             self.show_duplicates,
             self.show_plugins,
             self.show_audio_modules,
+            self.show_tasks,
             self.show_settings,
         )
         if isinstance(index, int) and 0 <= index < len(handlers):
@@ -265,6 +313,245 @@ class DJMakerUI:
         self.status.value = message
         self.page.show_dialog(ft.SnackBar(content=ft.Text(message)))
         self.page.update()
+
+    def _refresh_task_indicator(self) -> None:
+        """Синхронизирует компактный индикатор фоновых задач."""
+        active = self.tasks.active_count()
+        self.task_count_text.value = f"Задачи: {active}"
+        self.busy.visible = active > 0
+
+    async def monitor_tasks(self) -> None:
+        """Обновляет экран задач, пока долгие worker-операции меняют состояние."""
+        previous: tuple[object, ...] | None = None
+        while True:
+            await asyncio.sleep(0.4)
+            snapshots = self.tasks.snapshots()
+            signature = tuple(
+                (
+                    item.id,
+                    item.status,
+                    item.completed,
+                    item.succeeded,
+                    item.failed,
+                    item.detail,
+                )
+                for item in snapshots
+            )
+            if signature == previous:
+                continue
+            previous = signature
+            self._refresh_task_indicator()
+            if self.navigation.selected_index == 5:
+                self.show_tasks()
+            else:
+                self.page.update()
+
+    def show_tasks(self) -> None:
+        """Показывает текущие и завершённые задачи текущего сеанса."""
+        self._set_navigation_index(5)
+        snapshots = self.tasks.snapshots()
+        active = [item for item in snapshots if item.active]
+        history = [item for item in snapshots if not item.active]
+
+        summary = self._surface_card(
+            ft.Row(
+                controls=[
+                    ft.Icon(ft.Icons.PENDING_ACTIONS, color=ft.Colors.PRIMARY),
+                    ft.Column(
+                        controls=[
+                            ft.Text(
+                                f"Текущих задач: {len(active)}",
+                                weight=ft.FontWeight.BOLD,
+                            ),
+                            ft.Text(
+                                "Остановка сохраняет очередь для продолжения; "
+                                "отмена завершает задачу окончательно.",
+                                size=COMPACT_UI.font_xs,
+                                color=ft.Colors.ON_SURFACE_VARIANT,
+                            ),
+                        ],
+                        expand=True,
+                        spacing=2,
+                    ),
+                ]
+            )
+        )
+
+        items: list[ft.Control] = []
+        if not snapshots:
+            items.append(
+                self._empty_state(
+                    ft.Icons.TASK_ALT,
+                    "Фоновых задач пока нет",
+                    "Сканирование, индексирование обложек и BPM / Key появятся здесь.",
+                )
+            )
+        else:
+            if active:
+                items.append(ft.Text("Текущие", weight=ft.FontWeight.BOLD))
+                items.extend(self._task_card(item) for item in active)
+            if history:
+                items.append(ft.Text("История сеанса", weight=ft.FontWeight.BOLD))
+                items.extend(self._task_card(item) for item in history)
+
+        listing = ft.ListView(
+            controls=items,
+            expand=True,
+            spacing=COMPACT_UI.space_sm,
+        )
+        self._replace_content(
+            "Задачи",
+            "Фоновые операции DJMAKER",
+            summary,
+            listing,
+        )
+
+    def _task_card(self, snapshot: TaskSnapshot) -> ft.Control:
+        state_label, state_icon, state_color = self._task_state_view(snapshot.status)
+        if snapshot.total is not None:
+            counters = (
+                f"{snapshot.completed}/{snapshot.total} · "
+                f"успешно: {snapshot.succeeded} · ошибок: {snapshot.failed}"
+            )
+        else:
+            counters = (
+                f"обработано: {snapshot.completed} · "
+                f"успешно: {snapshot.succeeded} · ошибок: {snapshot.failed}"
+            )
+
+        actions: list[ft.Control] = []
+        if snapshot.can_stop:
+            actions.append(
+                ft.IconButton(
+                    icon=ft.Icons.PAUSE_CIRCLE_OUTLINE,
+                    icon_size=COMPACT_UI.action_icon_size,
+                    padding=COMPACT_UI.space_xs,
+                    visual_density=ft.VisualDensity.COMPACT,
+                    tooltip="Остановить с возможностью продолжения",
+                    on_click=lambda _, task_id=snapshot.id: self._stop_task(task_id),
+                )
+            )
+        if snapshot.can_resume:
+            actions.append(
+                ft.IconButton(
+                    icon=ft.Icons.PLAY_ARROW,
+                    icon_size=COMPACT_UI.action_icon_size,
+                    padding=COMPACT_UI.space_xs,
+                    visual_density=ft.VisualDensity.COMPACT,
+                    tooltip="Возобновить",
+                    on_click=lambda _, task_id=snapshot.id: self._resume_task(task_id),
+                )
+            )
+        if snapshot.can_cancel:
+            actions.append(
+                ft.IconButton(
+                    icon=ft.Icons.CANCEL_OUTLINED,
+                    icon_size=COMPACT_UI.action_icon_size,
+                    padding=COMPACT_UI.space_xs,
+                    visual_density=ft.VisualDensity.COMPACT,
+                    tooltip="Отменить окончательно",
+                    on_click=lambda _, task_id=snapshot.id: self._cancel_task(task_id),
+                )
+            )
+
+        progress_value = snapshot.progress
+        if progress_value is None and snapshot.status is not TaskStatus.RUNNING:
+            progress_value = 0.0
+
+        details: list[ft.Control] = [
+            ft.Row(
+                controls=[
+                    ft.Icon(state_icon, size=16, color=state_color),
+                    ft.Text(
+                        snapshot.title,
+                        weight=ft.FontWeight.BOLD,
+                        size=COMPACT_UI.font_sm,
+                    ),
+                    ft.Text(
+                        state_label,
+                        size=COMPACT_UI.font_xs,
+                        color=state_color,
+                    ),
+                    ft.Container(expand=True),
+                    *actions,
+                ],
+                spacing=COMPACT_UI.space_xs,
+            ),
+            ft.Text(
+                snapshot.detail or "—",
+                size=COMPACT_UI.font_xs,
+                color=ft.Colors.ON_SURFACE_VARIANT,
+            ),
+            ft.ProgressBar(value=progress_value),
+            ft.Text(
+                counters,
+                size=COMPACT_UI.font_micro,
+                color=ft.Colors.ON_SURFACE_VARIANT,
+            ),
+        ]
+        if snapshot.error:
+            details.append(
+                ft.Text(
+                    snapshot.error,
+                    size=COMPACT_UI.font_xs,
+                    color=ft.Colors.ERROR,
+                )
+            )
+        return self._surface_card(ft.Column(controls=details, spacing=3))
+
+    @staticmethod
+    def _task_state_view(status: TaskStatus) -> tuple[str, object, object]:
+        mapping = {
+            TaskStatus.RUNNING: ("Выполняется", ft.Icons.PLAY_ARROW, ft.Colors.PRIMARY),
+            TaskStatus.STOPPING: ("Останавливается", ft.Icons.PAUSE, ft.Colors.TERTIARY),
+            TaskStatus.PAUSED: ("Остановлено", ft.Icons.PAUSE_CIRCLE_OUTLINE, ft.Colors.TERTIARY),
+            TaskStatus.CANCELLING: ("Отменяется", ft.Icons.CANCEL, ft.Colors.ERROR),
+            TaskStatus.CANCELLED: ("Отменено", ft.Icons.CANCEL_OUTLINED, ft.Colors.ERROR),
+            TaskStatus.COMPLETED: ("Завершено", ft.Icons.CHECK_CIRCLE_OUTLINE, ft.Colors.PRIMARY),
+            TaskStatus.FAILED: ("Ошибка", ft.Icons.ERROR_OUTLINE, ft.Colors.ERROR),
+        }
+        return mapping[status]
+
+    def _stop_task(self, task_id: str) -> None:
+        task = self.tasks.get(task_id)
+        if task is None or not task.request_pause():
+            return
+        self._refresh_task_indicator()
+        self.show_tasks()
+
+    def _cancel_task(self, task_id: str) -> None:
+        task = self.tasks.get(task_id)
+        if task is None or not task.request_cancel():
+            return
+        if task.snapshot().status is TaskStatus.CANCELLED:
+            self._forget_task_context(task_id)
+        self._refresh_task_indicator()
+        self.show_tasks()
+
+    def _resume_task(self, task_id: str) -> None:
+        task = self.tasks.get(task_id)
+        if task is None:
+            return
+        snapshot = task.snapshot()
+        if not task.resume():
+            return
+
+        if snapshot.kind is TaskKind.AUDIO_ANALYSIS and task_id in self._audio_task_contexts:
+            self.page.run_task(self._run_audio_analysis, task_id)
+        elif snapshot.kind is TaskKind.LIBRARY_SCAN and task_id in self._scan_task_paths:
+            self.page.run_task(self._run_scan, self._scan_task_paths[task_id], task_id)
+        elif snapshot.kind is TaskKind.ARTWORK_INDEX and task_id in self._artwork_task_contexts:
+            self.page.run_task(self._run_embedded_artwork, task_id)
+        else:
+            task.mark_failed("Контекст задачи больше недоступен")
+
+        self._refresh_task_indicator()
+        self.show_tasks()
+
+    def _forget_task_context(self, task_id: str) -> None:
+        self._audio_task_contexts.pop(task_id, None)
+        self._scan_task_paths.pop(task_id, None)
+        self._artwork_task_contexts.pop(task_id, None)
 
     def _replace_content(
         self,
@@ -543,7 +830,9 @@ class DJMakerUI:
 
     async def _pick_and_scan(self, _: object) -> None:
         try:
-            selected = await ft.FilePicker().get_directory_path(dialog_title="Выберите папку с музыкой")
+            selected = await ft.FilePicker().get_directory_path(
+                dialog_title="Выберите папку с музыкой"
+            )
         except Exception as exc:
             LOGGER.exception("Ошибка FilePicker")
             self._notify(f"Не удалось открыть выбор папки: {exc}")
@@ -555,22 +844,77 @@ class DJMakerUI:
     def _scan_existing(self, path: Path) -> None:
         self.page.run_task(self._run_scan, path)
 
-    async def _run_scan(self, path: Path) -> None:
-        self._set_busy(True, f"Сканирование: {path}")
+    async def _run_scan(self, path: Path, task_id: str | None = None) -> None:
+        root = path.expanduser().resolve()
+        task: ManagedTask
+        if task_id is None:
+            task = self.tasks.create(
+                kind=TaskKind.LIBRARY_SCAN,
+                title=f"Сканирование: {root.name or root}",
+                detail=str(root),
+            )
+            task_id = task.id
+            self._scan_task_paths[task_id] = root
+        else:
+            task = self.tasks.get(task_id)  # type: ignore[assignment]
+            if task is None:
+                return
+
+        self._refresh_task_indicator()
+        self.status.value = f"Сканирование: {root}"
+        self.page.update()
+
+        def update_progress(stats: object, current_path: Path) -> None:
+            discovered = int(getattr(stats, "discovered", 0))
+            updated = int(getattr(stats, "updated", 0))
+            unchanged = int(getattr(stats, "unchanged", 0))
+            errors = int(getattr(stats, "errors", 0))
+            task.set_progress(
+                completed=updated + unchanged + errors,
+                succeeded=updated + unchanged,
+                failed=errors,
+                detail=f"{current_path.name} · найдено: {discovered}",
+            )
+
         try:
-            stats = await self.workers.run(self.service.scan_folder, path)
+            stats = await self.workers.run(
+                self.service.scan_folder,
+                root,
+                task=task,
+                progress=update_progress,
+            )
+        except TaskPaused:
+            task.mark_paused("Остановлено · можно продолжить")
+            self._notify(f"Сканирование остановлено: {root}")
+        except TaskCancelled:
+            task.mark_cancelled()
+            self._forget_task_context(task_id)
+            self._notify(f"Сканирование отменено: {root}")
         except Exception as exc:
             LOGGER.exception("Ошибка сканирования")
+            task.mark_failed(exc)
+            self._forget_task_context(task_id)
             self._notify(f"Ошибка сканирования: {exc}")
         else:
+            task.set_progress(
+                completed=stats.updated + stats.unchanged + stats.errors,
+                succeeded=stats.updated + stats.unchanged,
+                failed=stats.errors,
+                detail=f"Завершено · найдено: {stats.discovered}",
+            )
+            task.mark_completed()
+            self._forget_task_context(task_id)
             self._notify(
                 "Сканирование завершено: "
                 f"найдено {stats.discovered}, обновлено {stats.updated}, "
-                f"без изменений {stats.unchanged}, удалено {stats.removed}, ошибок {stats.errors}"
+                f"без изменений {stats.unchanged}, удалено {stats.removed}, "
+                f"ошибок {stats.errors}"
             )
-            self.show_folders()
+            if self.navigation.selected_index == 1:
+                self.show_folders()
         finally:
-            self._set_busy(False)
+            self._refresh_task_indicator()
+            self.page.update()
 
     def show_duplicates(self) -> None:
         """Показывает точные дубликаты по SHA-256."""
@@ -771,24 +1115,39 @@ class DJMakerUI:
         )
 
     def _start_audio_analysis(self, _: object, *, force: bool = False) -> None:
-        if self._analysis_running:
-            self._notify("Аудио-анализ уже выполняется")
+        existing = self.tasks.active_for_kind(TaskKind.AUDIO_ANALYSIS)
+        if existing is not None:
+            self._notify(
+                "BPM / Key уже выполняется или остановлен. "
+                "Откройте «Задачи» для управления."
+            )
             return
-        self.page.run_task(self._run_audio_analysis, force)
 
-    async def _run_audio_analysis(self, force: bool) -> None:
-        self._analysis_running = True
+        task = self.tasks.create(
+            kind=TaskKind.AUDIO_ANALYSIS,
+            title="BPM / Key анализ",
+            detail="Подготовка FFmpeg и Essentia...",
+        )
+        self._audio_task_contexts[task.id] = _AudioTaskContext(force=force)
+        self._refresh_task_indicator()
+        self.page.run_task(self._run_audio_analysis, task.id)
+
+    async def _run_audio_analysis(self, task_id: str) -> None:
+        task = self.tasks.get(task_id)
+        context = self._audio_task_contexts.get(task_id)
+        if task is None or context is None:
+            return
+
         self.analysis_progress.visible = True
-        self.analysis_progress.value = 0
+        self.analysis_progress.value = task.snapshot().progress or 0
         self.analysis_progress_text.visible = True
-        self.analysis_progress_text.value = "0/0"
         self._set_status("Подготовка FFmpeg и Essentia...")
 
-        analyzed = 0
-        errors = 0
         try:
+            task.checkpoint()
             report = await self.workers.run(self.runtime.ensure_all)
             self.runtime_report = report
+            task.checkpoint()
             if not report.ffmpeg.available:
                 raise RuntimeError(f"FFmpeg недоступен: {report.ffmpeg.detail}")
             if self.runtime.essentia_analyzer_path() is None:
@@ -797,70 +1156,118 @@ class DJMakerUI:
                     "Откройте Настройки → Аудио-компоненты."
                 )
 
-            tracks = await self.workers.run(
-                self.service.tracks_for_analysis,
-                force=force,
-            )
-            total = len(tracks)
-            if total == 0:
+            if context.pending_ids is None:
+                tracks = await self.workers.run(
+                    self.service.tracks_for_analysis,
+                    force=context.force,
+                )
+                context.pending_ids = {track.id for track in tracks}
+                context.labels = {track.id: str(track.path) for track in tracks}
+                task.set_progress(
+                    total=len(tracks),
+                    detail="Очередь BPM / Key подготовлена",
+                )
+
+            pending_ids = context.pending_ids
+            if not pending_ids:
+                task.mark_completed("Все треки уже проанализированы")
+                self._forget_task_context(task_id)
                 self._notify("Все треки уже проанализированы")
                 return
 
-            self.analysis_progress_text.value = f"0/{total}"
-            self.page.update()
-
+            total = task.snapshot().total or len(pending_ids)
             parallelism = min(
                 recommended_analysis_concurrency(),
                 self.workers.max_workers,
-                total,
+                len(pending_ids),
             )
-            tracks_by_id = {track.id: track for track in tracks}
-            completed = 0
+            task.set_progress(
+                detail=f"BPM / Key · потоков: {parallelism}"
+            )
             self.analysis_progress_text.value = (
-                f"0/{total} · потоков: {parallelism}"
+                f"{task.snapshot().completed}/{total} · потоков: {parallelism}"
             )
             self.page.update()
 
+            def analyze_one(track_id: int) -> TrackRecord:
+                task.checkpoint()
+                return self.service.analyze_track(track_id, task=task)
+
             async for outcome in self.workers.run_many_unordered(
-                self.service.analyze_track,
-                tracks_by_id,
+                analyze_one,
+                list(pending_ids),
                 max_concurrency=parallelism,
             ):
-                completed += 1
-                track = tracks_by_id[outcome.item]
+                if isinstance(outcome.error, (TaskPaused, TaskCancelled)):
+                    continue
+
+                label = context.labels.get(outcome.item, f"track_id={outcome.item}")
+                pending_ids.discard(outcome.item)
                 if outcome.error is not None:
-                    errors += 1
                     LOGGER.warning(
                         "Не удалось проанализировать %s: %s",
-                        track.path,
+                        label,
                         outcome.error,
                     )
+                    task.advance(success=False, detail=label)
                 else:
-                    analyzed += 1
+                    task.advance(success=True, detail=label)
 
+                snapshot = task.snapshot()
                 self.status.value = (
-                    f"BPM / Key: {completed}/{total} · потоков: {parallelism}"
+                    f"BPM / Key: {snapshot.completed}/{total} · "
+                    f"потоков: {parallelism}"
                 )
-                self.analysis_progress.value = completed / total
+                self.analysis_progress.value = snapshot.progress or 0
                 self.analysis_progress_text.value = (
-                    f"{completed}/{total} · потоков: {parallelism}"
+                    f"{snapshot.completed}/{total} · потоков: {parallelism}"
                 )
                 self.page.update()
 
-            self._notify(
-                f"Аудио-анализ завершён: {analyzed} успешно, {errors} ошибок"
-            )
-            if self.navigation.selected_index == 0:
-                self.show_library()
-            elif self.navigation.selected_index == 4:
-                self.show_audio_modules()
+            if task.cancel_requested:
+                task.mark_cancelled()
+                self._forget_task_context(task_id)
+                self._notify("BPM / Key анализ отменён")
+            elif task.pause_requested:
+                task.mark_paused("Остановлено · можно продолжить")
+                self._notify("BPM / Key анализ остановлен")
+            else:
+                snapshot = task.snapshot()
+                task.mark_completed(
+                    f"Готово: {snapshot.succeeded} успешно, "
+                    f"{snapshot.failed} ошибок"
+                )
+                self._forget_task_context(task_id)
+                self._notify(
+                    "Аудио-анализ завершён: "
+                    f"{snapshot.succeeded} успешно, {snapshot.failed} ошибок"
+                )
+                if self.navigation.selected_index == 0:
+                    self.show_library()
+                elif self.navigation.selected_index == 4:
+                    self.show_audio_modules()
+        except TaskPaused:
+            task.mark_paused("Остановлено · можно продолжить")
+            self._notify("BPM / Key анализ остановлен")
+        except TaskCancelled:
+            task.mark_cancelled()
+            self._forget_task_context(task_id)
+            self._notify("BPM / Key анализ отменён")
         except Exception as exc:
             LOGGER.exception("Ошибка пакетного аудио-анализа")
-            self._notify(f"Не удалось запустить BPM / Key анализ: {exc}")
+            task.mark_failed(exc)
+            self._forget_task_context(task_id)
+            self._notify(f"Не удалось выполнить BPM / Key анализ: {exc}")
         finally:
-            self._analysis_running = False
-            self.analysis_progress.visible = False
-            self.analysis_progress_text.visible = False
+            snapshot = task.snapshot()
+            running = snapshot.status in {
+                TaskStatus.RUNNING,
+                TaskStatus.STOPPING,
+                TaskStatus.CANCELLING,
+            }
+            self.analysis_progress.visible = running
+            self.analysis_progress_text.visible = running
+            self._refresh_task_indicator()
             self.page.update()
 
     @staticmethod
@@ -876,36 +1283,95 @@ class DJMakerUI:
         return " · ".join(parts)
 
     async def ensure_embedded_artwork(self) -> None:
-        """Один раз индексирует встроенные обложки старых записей медиатеки."""
+        """Индексирует встроенные обложки как управляемую фоновую задачу."""
+        existing = self.tasks.active_for_kind(TaskKind.ARTWORK_INDEX)
+        if existing is not None:
+            return
         try:
-            tracks = await self.workers.run(
-                self.service.tracks_for_artwork_refresh
-            )
+            tracks = await self.workers.run(self.service.tracks_for_artwork_refresh)
         except Exception:
             LOGGER.exception("Не удалось получить очередь встроенных обложек")
             return
         if not tracks:
             return
 
-        track_ids = [track.id for track in tracks]
-        concurrency = min(2, self.workers.max_workers)
-        changed = False
-        async for outcome in self.workers.run_many_unordered(
-            self.service.refresh_embedded_artwork,
-            track_ids,
-            max_concurrency=concurrency,
-        ):
-            if outcome.error is not None:
-                LOGGER.warning(
-                    "Не удалось прочитать встроенную обложку track_id=%s: %s",
-                    outcome.item,
-                    outcome.error,
-                )
-            else:
-                changed = True
+        task = self.tasks.create(
+            kind=TaskKind.ARTWORK_INDEX,
+            title="Индексирование встроенных обложек",
+            detail="Подготовка очереди...",
+            total=len(tracks),
+        )
+        self._artwork_task_contexts[task.id] = _BatchTaskContext(
+            pending_ids={track.id for track in tracks},
+            labels={track.id: str(track.path) for track in tracks},
+        )
+        self._refresh_task_indicator()
+        await self._run_embedded_artwork(task.id)
 
-        if changed and self.navigation.selected_index == 0:
-            self.show_library()
+    async def _run_embedded_artwork(self, task_id: str) -> None:
+        task = self.tasks.get(task_id)
+        context = self._artwork_task_contexts.get(task_id)
+        if task is None or context is None:
+            return
+
+        changed = False
+        concurrency = min(2, self.workers.max_workers)
+
+        def refresh_one(track_id: int) -> TrackRecord:
+            task.checkpoint()
+            return self.service.refresh_embedded_artwork(track_id, task=task)
+
+        try:
+            async for outcome in self.workers.run_many_unordered(
+                refresh_one,
+                list(context.pending_ids),
+                max_concurrency=concurrency,
+            ):
+                if isinstance(outcome.error, (TaskPaused, TaskCancelled)):
+                    continue
+
+                label = context.labels.get(
+                    outcome.item, f"track_id={outcome.item}"
+                )
+                context.pending_ids.discard(outcome.item)
+                if outcome.error is not None:
+                    LOGGER.warning(
+                        "Не удалось прочитать встроенную обложку %s: %s",
+                        label,
+                        outcome.error,
+                    )
+                    task.advance(success=False, detail=label)
+                else:
+                    changed = True
+                    task.advance(success=True, detail=label)
+
+            if task.cancel_requested:
+                task.mark_cancelled()
+                self._forget_task_context(task_id)
+            elif task.pause_requested:
+                task.mark_paused("Остановлено · можно продолжить")
+            else:
+                snapshot = task.snapshot()
+                task.mark_completed(
+                    f"Готово: {snapshot.succeeded} обложек, "
+                    f"{snapshot.failed} ошибок"
+                )
+                self._forget_task_context(task_id)
+        except TaskPaused:
+            task.mark_paused("Остановлено · можно продолжить")
+        except TaskCancelled:
+            task.mark_cancelled()
+            self._forget_task_context(task_id)
+        except Exception as exc:
+            LOGGER.exception("Ошибка индексирования встроенных обложек")
+            task.mark_failed(exc)
+            self._forget_task_context(task_id)
+        finally:
+            self._refresh_task_indicator()
+            if changed and self.navigation.selected_index == 0:
+                self.show_library()
+            else:
+                self.page.update()
 
     async def ensure_runtime_dependencies(self) -> None:
         """Фоново проверяет и устанавливает FFmpeg/Essentia при запуске."""
@@ -932,7 +1398,7 @@ class DJMakerUI:
                 f"FFmpeg {report.ffmpeg.version} · Essentia {report.essentia.version}"
             )
 
-        if self.navigation.selected_index == 5:
+        if self.navigation.selected_index == 6:
             self.show_settings()
 
     def _retry_runtime_dependencies(self, _: object) -> None:
@@ -1002,7 +1468,7 @@ class DJMakerUI:
 
     def show_settings(self) -> None:
         """Показывает настройки оформления и локальные пути приложения."""
-        self._set_navigation_index(5)
+        self._set_navigation_index(6)
         mode_dropdown = ft.Dropdown(
             label="Режим интерфейса",
             dense=True,
@@ -1141,7 +1607,7 @@ class DJMakerUI:
             f"{palette_title(self.settings.theme_palette)}"
         )
 
-        if self.navigation.selected_index == 5:
+        if self.navigation.selected_index == 6:
             self.show_settings()
         else:
             self.page.update()

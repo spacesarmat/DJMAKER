@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import tempfile
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 import unittest
 from pathlib import Path
@@ -86,6 +88,35 @@ class EmbeddedArtworkTests(unittest.TestCase):
 
             self.assertEqual(1, len(set(paths)))
             self.assertEqual(1, len(list(Path(temp).glob("*.jpg"))))
+
+    def test_artwork_cache_serializes_replace_on_windows_style_race(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            cache = ArtworkCache(Path(temp))
+            artwork = EmbeddedArtwork(b"\xff\xd8\xffsame-cover", "image/jpeg")
+            original_replace = Path.replace
+            replace_active = False
+            replace_guard = threading.Lock()
+
+            def windows_like_replace(source: Path, target: Path) -> Path:
+                nonlocal replace_active
+                with replace_guard:
+                    if replace_active:
+                        raise PermissionError(5, "simulated Windows replace race")
+                    replace_active = True
+                try:
+                    time.sleep(0.03)
+                    return original_replace(source, target)
+                finally:
+                    with replace_guard:
+                        replace_active = False
+
+            with patch.object(Path, "replace", new=windows_like_replace):
+                with ThreadPoolExecutor(max_workers=4) as executor:
+                    paths = list(executor.map(cache.store, [artwork] * 8))
+
+            self.assertEqual(1, len(set(paths)))
+            self.assertEqual(1, len(list(Path(temp).glob("*.jpg"))))
+            self.assertEqual([], list(Path(temp).glob("*.tmp")))
 
 
 if __name__ == "__main__":

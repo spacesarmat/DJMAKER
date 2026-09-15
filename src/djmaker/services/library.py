@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
 from djmaker.domain.models import (
@@ -18,6 +19,7 @@ from djmaker.services.artwork import ArtworkCache
 from djmaker.services.audio_tags import AudioTagService
 from djmaker.services.organizer import FileOrganizer
 from djmaker.services.scanner import LibraryScanner
+from djmaker.services.tasks import TaskControl
 
 
 class LibraryServiceError(RuntimeError):
@@ -45,9 +47,15 @@ class LibraryService:
         self.analyzer = analyzer
         self.artwork_cache = artwork_cache
 
-    def scan_folder(self, root: Path) -> ScanStats:
+    def scan_folder(
+        self,
+        root: Path,
+        *,
+        task: TaskControl | None = None,
+        progress: Callable[[ScanStats, Path], None] | None = None,
+    ) -> ScanStats:
         """Сканирует папку и возвращает статистику."""
-        return self.scanner.scan(root)
+        return self.scanner.scan(root, task=task, progress=progress)
 
     def tracks(self, search: str = "", limit: int = 1000) -> list[TrackRecord]:
         """Возвращает треки медиатеки."""
@@ -73,18 +81,30 @@ class LibraryService:
         """Возвращает треки, для которых ещё не проверена встроенная обложка."""
         return self.database.list_tracks_for_artwork_refresh()
 
-    def refresh_embedded_artwork(self, track_id: int) -> TrackRecord:
+    def refresh_embedded_artwork(
+        self,
+        track_id: int,
+        task: TaskControl | None = None,
+    ) -> TrackRecord:
         """Читает встроенную обложку, кэширует её и обновляет запись трека."""
+        if task is not None:
+            task.checkpoint()
         track = self._require_track(track_id)
         artwork = self.tags.embedded_artwork(track.path)
         artwork_path = self.artwork_cache.store(artwork)
         self.database.set_embedded_artwork(track_id, artwork_path)
         return self._require_track(track_id)
 
-    def analyze_track(self, track_id: int) -> TrackRecord:
+    def analyze_track(
+        self,
+        track_id: int,
+        task: TaskControl | None = None,
+    ) -> TrackRecord:
         """Анализирует один трек и сохраняет результат в SQLite."""
+        if task is not None:
+            task.checkpoint()
         track = self._require_track(track_id)
-        analysis = self.analyzer.analyze(track.path)
+        analysis = self.analyzer.analyze(track.path, task=task)
         self.database.save_audio_analysis(track_id, analysis)
         return self._require_track(track_id)
 

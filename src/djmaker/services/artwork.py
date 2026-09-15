@@ -22,6 +22,7 @@ class ArtworkCache:
 
     def __init__(self, root: Path) -> None:
         self.root = root
+        self._write_lock = threading.Lock()
 
     def store(self, artwork: EmbeddedArtwork | None) -> Path | None:
         """Сохраняет обложку атомарно; одинаковые данные не дублируются."""
@@ -35,26 +36,30 @@ class ArtworkCache:
         extension = _image_extension(artwork.mime_type, artwork.data)
         digest = hashlib.sha256(artwork.data).hexdigest()
         target = self.root / f"{digest}{extension}"
-        if target.is_file():
-            return target
 
-        try:
-            self.root.mkdir(parents=True, exist_ok=True)
-            temporary = self.root / (
-                f".{digest}.{os.getpid()}.{threading.get_ident()}.tmp"
-            )
-            temporary.write_bytes(artwork.data)
-            temporary.replace(target)
-        except OSError as exc:
-            raise ArtworkCacheError(
-                f"Не удалось сохранить встроенную обложку: {exc}"
-            ) from exc
-        finally:
+        with self._write_lock:
+            if target.is_file():
+                return target
+
+            temporary: Path | None = None
             try:
-                if "temporary" in locals() and temporary.exists():
-                    temporary.unlink()
-            except OSError:
-                pass
+                self.root.mkdir(parents=True, exist_ok=True)
+                temporary = self.root / (
+                    f".{digest}.{os.getpid()}.{threading.get_ident()}.tmp"
+                )
+                temporary.write_bytes(artwork.data)
+                temporary.replace(target)
+            except OSError as exc:
+                raise ArtworkCacheError(
+                    f"Не удалось сохранить встроенную обложку: {exc}"
+                ) from exc
+            finally:
+                try:
+                    if temporary is not None and temporary.exists():
+                        temporary.unlink()
+                except OSError:
+                    pass
+
         return target
 
 

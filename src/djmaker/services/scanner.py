@@ -6,12 +6,14 @@ import hashlib
 import logging
 import os
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 
 from djmaker.domain.models import EmbeddedArtwork, InspectedAudio, ScanStats
 from djmaker.infrastructure.database import LibraryDatabase
 from djmaker.services.artwork import ArtworkCache, ArtworkCacheError
 from djmaker.services.audio_tags import AudioTagError, AudioTagService
+from djmaker.services.tasks import TaskControl
 
 
 LOGGER = logging.getLogger(__name__)
@@ -68,7 +70,13 @@ class LibraryScanner:
         self.tags = tags
         self.artwork_cache = artwork_cache
 
-    def scan(self, root: Path) -> ScanStats:
+    def scan(
+        self,
+        root: Path,
+        *,
+        task: TaskControl | None = None,
+        progress: Callable[[ScanStats, Path], None] | None = None,
+    ) -> ScanStats:
         """Рекурсивно сканирует папку и синхронизирует её с медиатекой."""
         root = root.expanduser().resolve()
         if not root.exists():
@@ -76,6 +84,8 @@ class LibraryScanner:
         if not root.is_dir():
             raise ScanError(f"Указан не каталог: {root}")
 
+        if task is not None:
+            task.checkpoint()
         self.database.add_root(root)
         token = uuid.uuid4().hex
         stats = ScanStats()
@@ -91,11 +101,18 @@ class LibraryScanner:
                 path = directory_path / filename
                 if path.suffix.lower() not in AUDIO_EXTENSIONS:
                     continue
+                if task is not None:
+                    task.checkpoint()
                 stats.discovered += 1
-                self._scan_file(root, path, token, stats)
+                self._scan_file(root, path, token, stats, task=task)
+                if progress is not None:
+                    progress(stats, path)
 
         # Если os.walk не смог прочитать часть дерева, нельзя удалять из БД все
         # «неувиденные» файлы: они могли просто находиться в недоступной директории.
+        if task is not None:
+            task.checkpoint()
+
         if walk_errors:
             stats.errors += len(walk_errors)
             for error in walk_errors:
@@ -106,21 +123,34 @@ class LibraryScanner:
         self.database.set_root_scanned(root)
         return stats
 
-    def inspect_and_hash(self, path: Path) -> tuple[InspectedAudio, str, os.stat_result]:
+    def inspect_and_hash(
+        self,
+        path: Path,
+        task: TaskControl | None = None,
+    ) -> tuple[InspectedAudio, str, os.stat_result]:
         """Полностью анализирует один файл и вычисляет SHA-256."""
         try:
+            if task is not None:
+                task.checkpoint()
             stat = path.stat()
         except OSError as exc:
             raise ScanError(f"Не удалось прочитать свойства {path}: {exc}") from exc
+        if task is not None:
+            task.checkpoint()
         inspected = self.tags.inspect(path)
-        return inspected, self.sha256(path), stat
+        return inspected, self.sha256(path, task=task), stat
 
     @staticmethod
-    def sha256(path: Path) -> str:
-        """Вычисляет полный SHA-256 файла потоково, без загрузки в память."""
+    def sha256(path: Path, task: TaskControl | None = None) -> str:
+        """Вычисляет SHA-256 потоково с точками кооперативного прерывания."""
+        digest = hashlib.sha256()
         try:
             with path.open("rb") as file_obj:
-                return hashlib.file_digest(file_obj, "sha256").hexdigest()
+                while chunk := file_obj.read(1024 * 1024):
+                    if task is not None:
+                        task.checkpoint()
+                    digest.update(chunk)
+            return digest.hexdigest()
         except OSError as exc:
             raise ScanError(f"Не удалось вычислить SHA-256 {path}: {exc}") from exc
 
@@ -144,8 +174,12 @@ class LibraryScanner:
         path: Path,
         token: str,
         stats: ScanStats,
+        *,
+        task: TaskControl | None = None,
     ) -> None:
         try:
+            if task is not None:
+                task.checkpoint()
             stat = path.stat()
             signature = self.database.get_signature(path)
             current_signature = (stat.st_size, stat.st_mtime_ns)
@@ -155,7 +189,9 @@ class LibraryScanner:
                 return
 
             inspected = self.tags.inspect(path)
-            file_hash = self.sha256(path)
+            if task is not None:
+                task.checkpoint()
+            file_hash = self.sha256(path, task=task)
             artwork_path, artwork_checked = self._cache_artwork(
                 path, inspected.artwork
             )

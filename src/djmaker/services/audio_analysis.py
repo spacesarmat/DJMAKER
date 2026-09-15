@@ -7,10 +7,12 @@ import logging
 import os
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 
 from djmaker.domain.models import AudioAnalysis
 from djmaker.runtime.dependencies import RuntimeDependencies
+from djmaker.services.tasks import TaskControl, TaskInterrupted
 
 
 LOGGER = logging.getLogger(__name__)
@@ -36,8 +38,19 @@ class EssentiaAudioAnalyzer:
     def __init__(self, runtime: RuntimeDependencies) -> None:
         self.runtime = runtime
 
-    def analyze(self, path: Path) -> AudioAnalysis:
-        """Возвращает BPM, Key и Camelot для одного аудиофайла."""
+    def analyze(
+        self,
+        path: Path,
+        task: TaskControl | None = None,
+    ) -> AudioAnalysis:
+        """Возвращает BPM, Key и Camelot для одного аудиофайла.
+
+        ``task`` позволяет менеджеру задач остановить активные FFmpeg/Essentia
+        процессы, а затем продолжить пакет с оставшихся треков.
+        """
+        if task is not None:
+            task.checkpoint()
+
         source = path.expanduser().resolve()
         if not source.is_file():
             raise AudioAnalysisError(f"Аудиофайл не найден: {source}")
@@ -53,8 +66,8 @@ class EssentiaAudioAnalyzer:
 
         ffmpeg_command = build_ffmpeg_command(ffmpeg, source)
         essentia_command = build_essentia_command(essentia)
-
         creationflags = _creation_flags()
+
         with tempfile.TemporaryFile() as ffmpeg_stderr:
             decoder = subprocess.Popen(
                 ffmpeg_command,
@@ -67,43 +80,69 @@ class EssentiaAudioAnalyzer:
                 raise AudioAnalysisError("FFmpeg не открыл PCM pipe")
 
             try:
-                analysis = subprocess.run(
+                analyzer = subprocess.Popen(
                     essentia_command,
                     stdin=decoder.stdout,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
-                    check=False,
-                    timeout=ANALYSIS_TIMEOUT_SECONDS,
                     creationflags=creationflags,
                 )
+            except BaseException:
+                decoder.stdout.close()
+                _terminate_process(decoder)
+                raise
+            finally:
+                # После запуска Essentia родительская копия read-end больше не нужна.
+                decoder.stdout.close()
+
+            deadline = time.monotonic() + ANALYSIS_TIMEOUT_SECONDS
+            try:
+                while True:
+                    if task is not None:
+                        task.checkpoint()
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise subprocess.TimeoutExpired(
+                            essentia_command, ANALYSIS_TIMEOUT_SECONDS
+                        )
+                    try:
+                        analysis_stdout, analysis_stderr = analyzer.communicate(
+                            timeout=min(0.25, remaining)
+                        )
+                        break
+                    except subprocess.TimeoutExpired:
+                        continue
+            except TaskInterrupted:
+                _terminate_process(analyzer)
+                _terminate_process(decoder)
+                raise
             except subprocess.TimeoutExpired as exc:
-                decoder.kill()
-                decoder.wait()
+                _terminate_process(analyzer)
+                _terminate_process(decoder)
                 raise AudioAnalysisError(
                     f"Анализ превысил лимит {ANALYSIS_TIMEOUT_SECONDS // 60} минут"
                 ) from exc
-            finally:
-                decoder.stdout.close()
 
             try:
                 decoder_code = decoder.wait(timeout=15)
             except subprocess.TimeoutExpired as exc:
-                decoder.kill()
-                decoder.wait()
+                _terminate_process(decoder)
                 raise AudioAnalysisError("FFmpeg не завершился после анализа") from exc
 
             ffmpeg_stderr.seek(0)
-            decoder_error = ffmpeg_stderr.read().decode("utf-8", errors="replace").strip()
+            decoder_error = ffmpeg_stderr.read().decode(
+                "utf-8", errors="replace"
+            ).strip()
 
-        analyzer_error = analysis.stderr.decode("utf-8", errors="replace").strip()
+        analyzer_error = analysis_stderr.decode("utf-8", errors="replace").strip()
+        if analyzer.returncode != 0:
+            detail = analyzer_error or f"exit code {analyzer.returncode}"
+            raise AudioAnalysisError(f"Essentia: {detail}")
         if decoder_code != 0:
             detail = decoder_error or f"exit code {decoder_code}"
             raise AudioAnalysisError(f"FFmpeg: {detail}")
-        if analysis.returncode != 0:
-            detail = analyzer_error or f"exit code {analysis.returncode}"
-            raise AudioAnalysisError(f"Essentia: {detail}")
 
-        return parse_analysis_payload(analysis.stdout)
+        return parse_analysis_payload(analysis_stdout)
 
 
 def build_ffmpeg_command(executable: Path, source: Path) -> list[str]:
@@ -257,6 +296,17 @@ def _optional_float(value: object, field: str) -> float | None:
         return float(value)
     except (TypeError, ValueError) as exc:
         raise AudioAnalysisError(f"Поле {field} имеет неверный тип") from exc
+
+
+def _terminate_process(process: subprocess.Popen[bytes]) -> None:
+    """Завершает дочерний процесс и гарантированно собирает его exit status."""
+    if process.poll() is None:
+        process.kill()
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
 
 
 def _creation_flags() -> int:

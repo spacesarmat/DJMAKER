@@ -15,6 +15,7 @@ from djmaker.services.audio_tags import AudioTagService
 from djmaker.services.library import LibraryService
 from djmaker.services.organizer import FileOrganizer
 from djmaker.services.scanner import LibraryScanner
+from djmaker.services.tasks import TaskManager
 from djmaker.services.workers import BackgroundWorkers
 from djmaker.settings import SettingsStore
 from djmaker.ui.app import DJMakerUI
@@ -44,6 +45,7 @@ async def flet_main(page: ft.Page) -> None:
         artwork_cache,
     )
     workers = BackgroundWorkers(max_workers=4)
+    tasks = TaskManager()
     settings_store = SettingsStore(paths.settings_file)
     settings = settings_store.load()
 
@@ -55,8 +57,10 @@ async def flet_main(page: ft.Page) -> None:
         settings_store,
         settings,
         runtime,
+        tasks,
     )
     ui.build()
+    page.run_task(ui.monitor_tasks)
     page.run_task(ui.ensure_runtime_dependencies)
     page.run_task(ui.ensure_embedded_artwork)
 
