@@ -47,8 +47,7 @@ class DJMakerUI:
         self.settings = settings
 
         self.search = ft.TextField(
-            label="Поиск в медиатеке",
-            hint_text="Название, артист, альбом или путь",
+            hint_text="Поиск в медиатеке",
             expand=True,
             dense=True,
             text_size=COMPACT_UI.font_sm,
@@ -62,17 +61,6 @@ class DJMakerUI:
             color=ft.Colors.ON_SURFACE_VARIANT,
         )
         self.content = ft.Column(expand=True, spacing=COMPACT_UI.space_md)
-        self.header_title = ft.Text(
-            "Медиатека",
-            size=COMPACT_UI.font_title,
-            weight=ft.FontWeight.BOLD,
-            color=ft.Colors.ON_SURFACE,
-        )
-        self.header_subtitle = ft.Text(
-            "Локальная музыкальная библиотека",
-            size=COMPACT_UI.font_xs,
-            color=ft.Colors.ON_SURFACE_VARIANT,
-        )
         self.theme_button = ft.IconButton(
             icon=theme_mode_icon(self.settings.theme_mode),
             icon_size=COMPACT_UI.action_icon_size,
@@ -92,32 +80,8 @@ class DJMakerUI:
         self.page.window.min_height = 640
         apply_app_theme(self.page, self.settings)
 
-        header = ft.Container(
-            bgcolor=ft.Colors.SURFACE_CONTAINER_LOWEST,
-            padding=ft.Padding.symmetric(
-                horizontal=COMPACT_UI.header_horizontal_padding,
-                vertical=COMPACT_UI.header_vertical_padding,
-            ),
-            content=ft.Row(
-                controls=[
-                    ft.Column(
-                        controls=[self.header_title, self.header_subtitle],
-                        spacing=1,
-                        width=200,
-                    ),
-                    self.search,
-                    self.busy,
-                    self.theme_button,
-                ],
-                vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                spacing=COMPACT_UI.space_md,
-            ),
-        )
-
         workspace = ft.Column(
             controls=[
-                header,
-                ft.Divider(height=1, color=ft.Colors.OUTLINE_VARIANT),
                 ft.Container(
                     content=self.content,
                     expand=True,
@@ -284,8 +248,7 @@ class DJMakerUI:
         subtitle: str,
         *controls: ft.Control,
     ) -> None:
-        self.header_title.value = title
-        self.header_subtitle.value = subtitle
+        del title, subtitle
         self.content.controls.clear()
         self.content.controls.extend(controls)
         self.page.update()
@@ -342,13 +305,17 @@ class DJMakerUI:
                     size=COMPACT_UI.font_sm,
                     weight=ft.FontWeight.BOLD,
                 ),
+                self.search,
+                self.busy,
                 ft.Button(
                     content="Обновить",
                     icon=ft.Icons.REFRESH,
                     on_click=lambda _: self.show_library(),
                 ),
+                self.theme_button,
             ],
-            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            spacing=COMPACT_UI.space_sm,
         )
         items: list[ft.Control] = []
         if not tracks:
