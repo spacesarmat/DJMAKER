@@ -1,0 +1,32 @@
+name: build-desktop
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: windows
+          - os: macos-latest
+            target: macos
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+      - name: Install build tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e . "flet[cli]==0.86.5"
+      - name: Build
+        run: flet build ${{ matrix.target }} --yes
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: DJMAKER-${{ matrix.target }}
+          path: build/${{ matrix.target }}

@@ -1,0 +1,130 @@
+"""Высокоуровневые операции медиатеки."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from djmaker.domain.models import AudioMetadata, DuplicateGroup, MetadataCandidate, ScanStats, TrackRecord
+from djmaker.infrastructure.database import LibraryDatabase
+from djmaker.plugins.registry import PluginRegistry
+from djmaker.services.audio_tags import AudioTagService
+from djmaker.services.organizer import FileOrganizer
+from djmaker.services.scanner import LibraryScanner
+
+
+class LibraryServiceError(RuntimeError):
+    """Ошибка высокоуровневой операции медиатеки."""
+
+
+class LibraryService:
+    """Фасад для UI: БД, сканирование, теги, организация и онлайн-плагины."""
+
+    def __init__(
+        self,
+        database: LibraryDatabase,
+        scanner: LibraryScanner,
+        tags: AudioTagService,
+        organizer: FileOrganizer,
+        plugins: PluginRegistry,
+    ) -> None:
+        self.database = database
+        self.scanner = scanner
+        self.tags = tags
+        self.organizer = organizer
+        self.plugins = plugins
+
+    def scan_folder(self, root: Path) -> ScanStats:
+        """Сканирует папку и возвращает статистику."""
+        return self.scanner.scan(root)
+
+    def tracks(self, search: str = "", limit: int = 1000) -> list[TrackRecord]:
+        """Возвращает треки медиатеки."""
+        return self.database.list_tracks(search=search, limit=limit)
+
+    def roots(self) -> list[Path]:
+        """Возвращает корневые музыкальные папки."""
+        return self.database.list_roots()
+
+    def exact_duplicates(self) -> list[DuplicateGroup]:
+        """Возвращает точные дубликаты по SHA-256."""
+        return self.database.find_exact_duplicates()
+
+    def update_tags(self, track_id: int, metadata: AudioMetadata) -> TrackRecord:
+        """Записывает теги в файл и синхронизирует запись SQLite."""
+        track = self._require_track(track_id)
+        self.tags.write(track.path, metadata)
+        inspected, file_hash, stat = self.scanner.inspect_and_hash(track.path)
+        self.database.update_after_file_change(
+            track_id,
+            new_path=track.path,
+            root=track.root_path,
+            size=stat.st_size,
+            mtime_ns=stat.st_mtime_ns,
+            file_hash=file_hash,
+            metadata=inspected.metadata,
+            technical=inspected.technical,
+        )
+        return self._require_track(track_id)
+
+    def organize_track(self, track_id: int, destination: Path, template: str) -> TrackRecord:
+        """Переносит/переименовывает трек по шаблону и обновляет медиатеку."""
+        track = self._require_track(track_id)
+        destination = destination.expanduser().resolve()
+        target = self.organizer.build_target(track, destination, template)
+        moved = self.organizer.move(track.path, target)
+        try:
+            inspected, file_hash, stat = self.scanner.inspect_and_hash(moved)
+            self.database.update_after_file_change(
+                track_id,
+                new_path=moved,
+                root=destination,
+                size=stat.st_size,
+                mtime_ns=stat.st_mtime_ns,
+                file_hash=file_hash,
+                metadata=inspected.metadata,
+                technical=inspected.technical,
+            )
+            self.database.add_root(destination)
+        except Exception as exc:
+            # Файл уже был перемещён: возвращаем точный контекст вместо маскировки ошибки.
+            raise LibraryServiceError(
+                f"Файл перемещён в {moved}, но БД не удалось обновить: {exc}"
+            ) from exc
+        return self._require_track(track_id)
+
+    def search_metadata(
+        self,
+        track_id: int,
+        provider_id: str = "musicbrainz",
+        limit: int = 10,
+    ) -> list[MetadataCandidate]:
+        """Ищет метаданные трека через выбранный внешний плагин."""
+        track = self._require_track(track_id)
+        return self.plugins.get(provider_id).search(track, limit=limit)
+
+    def apply_candidate(self, track_id: int, candidate: MetadataCandidate) -> TrackRecord:
+        """Применяет найденные метаданные и сохраняет URL обложки."""
+        current = self._require_track(track_id)
+        metadata = AudioMetadata(
+            title=candidate.title or current.metadata.title,
+            artist=candidate.artist or current.metadata.artist,
+            album=candidate.album or current.metadata.album,
+            album_artist=current.metadata.album_artist,
+            genre=current.metadata.genre,
+            year=candidate.year or current.metadata.year,
+            track_number=current.metadata.track_number,
+            disc_number=current.metadata.disc_number,
+            bpm=current.metadata.bpm,
+            musical_key=current.metadata.musical_key,
+        )
+        updated = self.update_tags(track_id, metadata)
+        if candidate.artwork_url:
+            self.database.set_artwork_url(track_id, candidate.artwork_url)
+            updated.artwork_url = candidate.artwork_url
+        return updated
+
+    def _require_track(self, track_id: int) -> TrackRecord:
+        track = self.database.get_track(track_id)
+        if track is None:
+            raise LibraryServiceError(f"Трек не найден: {track_id}")
+        return track

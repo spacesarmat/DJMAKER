@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=78"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "djmaker"
+version = "0.1.0"
+description = "Кроссплатформенный менеджер музыкальной библиотеки для Windows и macOS"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "flet==0.86.5",
+    "mutagen==1.48.1",
+]
+
+[project.scripts]
+djmaker = "djmaker.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+djmaker = ["py.typed"]
+
+[tool.flet.app]
+path = "src"
+module = "main.py"
+[tool.flet.boot_screen.flet]
+theme_mode = "auto"
+

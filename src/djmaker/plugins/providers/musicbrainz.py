@@ -1,0 +1,120 @@
+"""Плагин MusicBrainz: поиск метаданных без стороннего HTTP-клиента."""
+
+from __future__ import annotations
+
+import json
+import os
+import threading
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from typing import Any
+
+from djmaker import __version__
+from djmaker.domain.models import MetadataCandidate, TrackRecord
+from djmaker.plugins.base import MetadataProvider, MetadataProviderError
+
+
+class MusicBrainzProvider(MetadataProvider):
+    """Провайдер MusicBrainz с простым ограничением частоты запросов."""
+
+    provider_id = "musicbrainz"
+    display_name = "MusicBrainz"
+    _base_url = "https://musicbrainz.org/ws/2/recording/"
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._last_request = 0.0
+
+    def search(self, track: TrackRecord, limit: int = 10) -> list[MetadataCandidate]:
+        """Ищет записи MusicBrainz по title/artist локального трека."""
+        title = track.metadata.title or track.path.stem
+        artist = track.metadata.artist
+        query_parts = [f'recording:"{self._escape_query(title)}"']
+        if artist:
+            query_parts.append(f'artist:"{self._escape_query(artist)}"')
+        query = " AND ".join(query_parts)
+        params = urllib.parse.urlencode(
+            {"query": query, "fmt": "json", "limit": max(1, min(limit, 25))}
+        )
+        url = f"{self._base_url}?{params}"
+
+        self._throttle()
+        request = urllib.request.Request(
+            url,
+            headers={
+                "Accept": "application/json",
+                "User-Agent": self._user_agent(),
+            },
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=15) as response:
+                payload = response.read()
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            raise MetadataProviderError(f"MusicBrainz недоступен: {exc}") from exc
+
+        try:
+            data = json.loads(payload.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise MetadataProviderError(f"Некорректный ответ MusicBrainz: {exc}") from exc
+
+        recordings = data.get("recordings", [])
+        if not isinstance(recordings, list):
+            raise MetadataProviderError("MusicBrainz вернул неожиданный формат данных")
+        return [self._candidate(item) for item in recordings if isinstance(item, dict)]
+
+    def _candidate(self, item: dict[str, Any]) -> MetadataCandidate:
+        artists = item.get("artist-credit") or []
+        artist = ""
+        if isinstance(artists, list):
+            names: list[str] = []
+            for credit in artists:
+                if isinstance(credit, dict):
+                    name = credit.get("name")
+                    if isinstance(name, str) and name:
+                        names.append(name)
+            artist = " & ".join(names)
+
+        album = ""
+        year = ""
+        release_id = ""
+        releases = item.get("releases") or []
+        if isinstance(releases, list) and releases:
+            release = releases[0]
+            if isinstance(release, dict):
+                album = str(release.get("title") or "")
+                year = str(release.get("date") or "")[:4]
+                release_id = str(release.get("id") or "")
+
+        artwork_url = (
+            f"https://coverartarchive.org/release/{release_id}/front-500"
+            if release_id
+            else ""
+        )
+        return MetadataCandidate(
+            provider_id=self.provider_id,
+            external_id=str(item.get("id") or ""),
+            title=str(item.get("title") or ""),
+            artist=artist,
+            album=album,
+            year=year,
+            release_id=release_id,
+            artwork_url=artwork_url,
+        )
+
+    def _throttle(self) -> None:
+        with self._lock:
+            elapsed = time.monotonic() - self._last_request
+            if elapsed < 1.05:
+                time.sleep(1.05 - elapsed)
+            self._last_request = time.monotonic()
+
+    @staticmethod
+    def _escape_query(value: str) -> str:
+        return value.replace("\\", "\\\\").replace('"', '\\"')
+
+    @staticmethod
+    def _user_agent() -> str:
+        contact = os.getenv("DJMAKER_MUSICBRAINZ_CONTACT", "https://github.com/DJMAKER")
+        return f"DJMAKER/{__version__} ({contact})"
