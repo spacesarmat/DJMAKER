@@ -19,6 +19,7 @@ from djmaker.runtime.dependencies import (
     RuntimeReport,
 )
 from djmaker.services.audio_analysis import recommended_analysis_concurrency
+from djmaker.services.file_browser import reveal_file
 from djmaker.services.library import LibraryService
 from djmaker.services.tasks import (
     ManagedTask,
@@ -1335,31 +1336,11 @@ class DJMakerUI:
         )
 
     def _track_row(self, track: TrackRecord) -> ft.Control:
-        first_line = self._track_primary_line(track)
-        second_line = self._track_technical_line(track)
         metadata_block = ft.Column(
             controls=[
-                ft.Text(
-                    first_line,
-                    weight=ft.FontWeight.BOLD,
-                    size=COMPACT_UI.font_sm,
-                    max_lines=1,
-                    overflow=ft.TextOverflow.ELLIPSIS,
-                ),
-                ft.Text(
-                    second_line,
-                    size=COMPACT_UI.font_xs,
-                    color=ft.Colors.ON_SURFACE_VARIANT,
-                    max_lines=1,
-                    overflow=ft.TextOverflow.ELLIPSIS,
-                ),
-                ft.Text(
-                    str(track.path),
-                    size=COMPACT_UI.font_micro,
-                    color=ft.Colors.ON_SURFACE_VARIANT,
-                    max_lines=1,
-                    overflow=ft.TextOverflow.ELLIPSIS,
-                ),
+                self._track_title_row(track),
+                self._track_details_row(track),
+                self._track_path_link(track),
             ],
             expand=True,
             height=COMPACT_UI.track_icon_box,
@@ -1378,7 +1359,9 @@ class DJMakerUI:
                         padding=COMPACT_UI.space_xs,
                         visual_density=ft.VisualDensity.COMPACT,
                         tooltip="Редактировать теги",
-                        on_click=lambda _, track_id=track.id: self._open_tag_editor(track_id),
+                        on_click=lambda _, track_id=track.id: self._open_tag_editor(
+                            track_id
+                        ),
                     ),
                     ft.IconButton(
                         icon=ft.Icons.DRIVE_FILE_MOVE_OUTLINED,
@@ -1386,7 +1369,9 @@ class DJMakerUI:
                         padding=COMPACT_UI.space_xs,
                         visual_density=ft.VisualDensity.COMPACT,
                         tooltip="Организовать файл",
-                        on_click=lambda _, track_id=track.id: self._open_organizer(track_id),
+                        on_click=lambda _, track_id=track.id: self._open_organizer(
+                            track_id
+                        ),
                     ),
                     ft.IconButton(
                         icon=ft.Icons.SEARCH,
@@ -1394,7 +1379,9 @@ class DJMakerUI:
                         padding=COMPACT_UI.space_xs,
                         visual_density=ft.VisualDensity.COMPACT,
                         tooltip="Найти метаданные",
-                        on_click=lambda _, track_id=track.id: self._start_metadata_search(track_id),
+                        on_click=lambda _, track_id=track.id: (
+                            self._start_metadata_search(track_id)
+                        ),
                     ),
                 ],
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
@@ -1418,6 +1405,158 @@ class DJMakerUI:
                 mouse_cursor=ft.MouseCursor.CLICK,
             ),
         )
+
+    def _track_title_row(self, track: TrackRecord) -> ft.Control:
+        artist = track.metadata.artist.strip() or "Unknown Artist"
+        title = track.metadata.title.strip() or track.path.stem
+        return ft.Row(
+            controls=[
+                ft.Text(
+                    f"{artist} - {title}",
+                    expand=True,
+                    weight=ft.FontWeight.BOLD,
+                    size=COMPACT_UI.font_sm,
+                    max_lines=1,
+                    overflow=ft.TextOverflow.ELLIPSIS,
+                ),
+                self._track_tag(self._track_key_label(track), accent=True),
+                self._track_tag(self._track_bpm_label(track), accent=True),
+            ],
+            spacing=COMPACT_UI.space_xs,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        )
+
+    def _track_details_row(self, track: TrackRecord) -> ft.Control:
+        album = track.metadata.album.strip() or "Альбом —"
+        controls: list[ft.Control] = [
+            ft.Text(
+                self._format_duration(track.technical.duration),
+                size=COMPACT_UI.font_xs,
+                color=ft.Colors.ON_SURFACE,
+            )
+        ]
+        controls.extend(
+            self._track_tag(label) for label in self._track_detail_tags(track)
+        )
+        controls.append(
+            ft.Text(
+                album,
+                expand=True,
+                size=COMPACT_UI.font_xs,
+                color=ft.Colors.ON_SURFACE_VARIANT,
+                max_lines=1,
+                overflow=ft.TextOverflow.ELLIPSIS,
+            )
+        )
+        return ft.Row(
+            controls=controls,
+            spacing=COMPACT_UI.space_xs,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        )
+
+    def _track_path_link(self, track: TrackRecord) -> ft.Control:
+        return ft.GestureDetector(
+            content=ft.Row(
+                controls=[
+                    ft.Icon(
+                        ft.Icons.FOLDER_OPEN_OUTLINED,
+                        size=COMPACT_UI.font_xs,
+                        color=ft.Colors.PRIMARY,
+                    ),
+                    ft.Text(
+                        str(track.path),
+                        expand=True,
+                        size=COMPACT_UI.font_micro,
+                        color=ft.Colors.PRIMARY,
+                        max_lines=1,
+                        overflow=ft.TextOverflow.ELLIPSIS,
+                    ),
+                ],
+                spacing=COMPACT_UI.space_xs,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+            on_double_tap=lambda _, current=track: self._reveal_track_file(current),
+            mouse_cursor=ft.MouseCursor.CLICK,
+        )
+
+    @staticmethod
+    def _track_tag(label: str, *, accent: bool = False) -> ft.Control:
+        return ft.Container(
+            height=12,
+            padding=ft.Padding.symmetric(horizontal=4),
+            border_radius=4,
+            bgcolor=(
+                ft.Colors.PRIMARY_CONTAINER
+                if accent
+                else ft.Colors.SURFACE_CONTAINER_HIGHEST
+            ),
+            alignment=ft.Alignment.CENTER,
+            content=ft.Text(
+                label,
+                size=COMPACT_UI.font_micro,
+                color=(
+                    ft.Colors.ON_PRIMARY_CONTAINER
+                    if accent
+                    else ft.Colors.ON_SURFACE_VARIANT
+                ),
+                max_lines=1,
+            ),
+        )
+
+    @staticmethod
+    def _track_bpm_label(track: TrackRecord) -> str:
+        bpm = track.analysis.bpm if track.analysis is not None else None
+        if bpm is None:
+            bpm = track.metadata.bpm
+        return f"{bpm:.1f} BPM" if bpm is not None else "BPM —"
+
+    @staticmethod
+    def _track_key_label(track: TrackRecord) -> str:
+        analysis = track.analysis
+        if analysis is not None:
+            key = " ".join(
+                part for part in (analysis.musical_key, analysis.scale) if part
+            )
+            parts = [part for part in (key, analysis.camelot) if part]
+            if parts:
+                return " · ".join(parts)
+        return track.metadata.musical_key.strip() or "Key —"
+
+    @staticmethod
+    def _track_detail_tags(track: TrackRecord) -> tuple[str, ...]:
+        tags: list[str] = []
+        year = track.metadata.year.strip()
+        if year:
+            tags.append(year)
+
+        tags.append((track.extension.lstrip(".") or "audio").upper())
+
+        technical = track.technical
+        if technical.bitrate:
+            tags.append(f"{round(technical.bitrate / 1000)} kbps")
+        if technical.sample_rate:
+            tags.append(f"{technical.sample_rate / 1000:g} kHz")
+        if technical.channels:
+            channel_label = (
+                "Mono"
+                if technical.channels == 1
+                else "Stereo"
+                if technical.channels == 2
+                else f"{technical.channels} ch"
+            )
+            tags.append(channel_label)
+        return tuple(tags)
+
+    def _reveal_track_file(self, track: TrackRecord) -> None:
+        try:
+            reveal_file(track.path)
+        except OSError as exc:
+            LOGGER.warning(
+                "Не удалось открыть расположение файла %s: %s",
+                track.path,
+                exc,
+            )
+            self._notify("Не удалось открыть папку с файлом")
 
     def _track_artwork(self, track: TrackRecord) -> ft.Control:
         """Показывает кликабельную обложку с embedded/online fallback."""
@@ -1520,51 +1659,6 @@ class DJMakerUI:
             ),
             mouse_cursor=ft.MouseCursor.CLICK,
         )
-
-    def _track_primary_line(self, track: TrackRecord) -> str:
-        artist = track.metadata.artist or "Unknown Artist"
-        title = track.metadata.title or track.path.stem
-        album = track.metadata.album or "Unknown Album"
-        return f"{artist} - {title} | {album} | {self._compact_analysis_label(track)}"
-
-    def _track_technical_line(self, track: TrackRecord) -> str:
-        technical = track.technical
-        file_format = (track.extension.lstrip(".") or "audio").upper()
-        duration = self._format_duration(technical.duration)
-        quality: list[str] = []
-        if technical.bitrate:
-            quality.append(f"{round(technical.bitrate / 1000)} kbps")
-        if technical.sample_rate:
-            quality.append(f"{technical.sample_rate / 1000:g} kHz")
-        if technical.channels:
-            channel_label = (
-                "Mono"
-                if technical.channels == 1
-                else "Stereo"
-                if technical.channels == 2
-                else f"{technical.channels} ch"
-            )
-            quality.append(channel_label)
-        genre = track.metadata.genre.strip() or "Жанр —"
-        quality_label = " · ".join(quality) or "Качество —"
-        return f"{file_format} | {duration} | {quality_label} | {genre}"
-
-    @staticmethod
-    def _compact_analysis_label(track: TrackRecord) -> str:
-        analysis = track.analysis
-        if analysis is None:
-            return "(BPM/KEY —)"
-        parts: list[str] = []
-        if analysis.bpm is not None:
-            parts.append(f"{analysis.bpm:.1f} BPM")
-        key = " ".join(
-            part for part in (analysis.musical_key, analysis.scale) if part
-        )
-        if key:
-            parts.append(key)
-        if analysis.camelot:
-            parts.append(analysis.camelot)
-        return f"({' / '.join(parts) if parts else 'BPM/KEY —'})"
 
     def show_folders(self) -> None:
         """Отображает корневые папки и действия сканирования."""

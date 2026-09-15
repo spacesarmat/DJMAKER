@@ -62,9 +62,13 @@ class WaveformUITests(unittest.TestCase):
     def test_track_metadata_is_rendered_in_three_requested_lines(self) -> None:
         source = UI_SOURCE.read_text(encoding="utf-8")
 
-        self.assertIn("def _track_primary_line", source)
-        self.assertIn("def _track_technical_line", source)
-        self.assertIn("str(track.path)", source)
+        self.assertIn("def _track_title_row", source)
+        self.assertIn("self._track_key_label(track)", source)
+        self.assertIn("self._track_bpm_label(track)", source)
+        self.assertIn("def _track_details_row", source)
+        self.assertIn("self._track_detail_tags(track)", source)
+        self.assertIn("def _track_path_link", source)
+        self.assertIn("on_double_tap=", source)
         self.assertIn("height=COMPACT_UI.track_icon_box", source)
 
     def test_waveform_background_task_starts_with_application(self) -> None:
