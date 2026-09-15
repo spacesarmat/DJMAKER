@@ -1,11 +1,11 @@
-# DJMAKER patch 0007 — собственная современная Essentia
+# DJMAKER patch 0008
 
-- Удалена зависимость от старых Windows Essentia extractors 2.1 beta5/i686.
-- Добавлен воспроизводимый GitHub Actions build из pinned upstream Essentia commit.
-- Windows runtime теперь x64 MinGW и проходит smoke-test на настоящем Windows runner.
-- macOS собирается отдельно для Intel и Apple Silicon.
-- Добавлен собственный `djmaker-essentia` bridge: BPM + Key, JSON output, self-test.
-- FFmpeg декодирует аудио; Essentia собирается lightweight + KISS FFT.
-- Runtime manager скачивает наши Releases и проверяет SHA-256.
-- Release workflow публикует corresponding source archive для AGPL-сборки.
-- Добавлен PowerShell helper для запуска/наблюдения GitHub Actions build.
+Исправляет запуск `scripts/trigger_essentia_build.ps1` в Windows PowerShell 5.1.
+
+Изменения:
+
+- PowerShell helper теперь полностью ASCII-only и не зависит от системной кодировки Windows.
+- Убраны хрупкие backtick-переносы команд.
+- Перед запуском проверяются `gh`, авторизация и наличие workflow в удалённом репозитории.
+- Скрипт запоминает существующие workflow runs и после dispatch ждёт именно новый run.
+- Добавлены регрессионные unit-тесты для кодировки helper-скрипта.
