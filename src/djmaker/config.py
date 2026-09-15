@@ -21,6 +21,7 @@ class AppPaths:
     database: Path
     log_file: Path
     settings_file: Path
+    artwork_dir: Path
 
 
 def default_data_dir() -> Path:
@@ -51,4 +52,5 @@ def get_app_paths() -> AppPaths:
         database=data_dir / "library.sqlite3",
         log_file=data_dir / "djmaker.log",
         settings_file=data_dir / "settings.json",
+        artwork_dir=data_dir / "artwork",
     )

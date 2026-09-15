@@ -9,6 +9,7 @@ from djmaker.services.audio_analysis import (
     build_ffmpeg_command,
     camelot_code,
     parse_analysis_payload,
+    recommended_analysis_concurrency,
 )
 
 
@@ -46,6 +47,12 @@ class AudioAnalysisHelpersTests(unittest.TestCase):
         self.assertIn(str(ANALYSIS_SAMPLE_RATE), command)
         self.assertEqual("pipe:1", command[-1])
         self.assertIn("track.flac", command)
+
+    def test_recommended_concurrency_uses_multiple_workers_but_is_capped(self) -> None:
+        self.assertEqual(1, recommended_analysis_concurrency(1))
+        self.assertEqual(2, recommended_analysis_concurrency(2))
+        self.assertEqual(2, recommended_analysis_concurrency(4))
+        self.assertEqual(4, recommended_analysis_concurrency(16))
 
     def test_essentia_command_reads_stdin(self) -> None:
         command = build_essentia_command(Path("djmaker-essentia"))

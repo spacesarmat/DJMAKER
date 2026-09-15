@@ -14,6 +14,7 @@ from djmaker.domain.models import (
 from djmaker.infrastructure.database import LibraryDatabase
 from djmaker.plugins.registry import PluginRegistry
 from djmaker.services.audio_analysis import EssentiaAudioAnalyzer
+from djmaker.services.artwork import ArtworkCache
 from djmaker.services.audio_tags import AudioTagService
 from djmaker.services.organizer import FileOrganizer
 from djmaker.services.scanner import LibraryScanner
@@ -34,6 +35,7 @@ class LibraryService:
         organizer: FileOrganizer,
         plugins: PluginRegistry,
         analyzer: EssentiaAudioAnalyzer,
+        artwork_cache: ArtworkCache,
     ) -> None:
         self.database = database
         self.scanner = scanner
@@ -41,6 +43,7 @@ class LibraryService:
         self.organizer = organizer
         self.plugins = plugins
         self.analyzer = analyzer
+        self.artwork_cache = artwork_cache
 
     def scan_folder(self, root: Path) -> ScanStats:
         """Сканирует папку и возвращает статистику."""
@@ -65,6 +68,18 @@ class LibraryService:
     def tracks_for_analysis(self, *, force: bool = False) -> list[TrackRecord]:
         """Возвращает очередь треков для BPM/Key анализа."""
         return self.database.list_tracks_for_analysis(force=force)
+
+    def tracks_for_artwork_refresh(self) -> list[TrackRecord]:
+        """Возвращает треки, для которых ещё не проверена встроенная обложка."""
+        return self.database.list_tracks_for_artwork_refresh()
+
+    def refresh_embedded_artwork(self, track_id: int) -> TrackRecord:
+        """Читает встроенную обложку, кэширует её и обновляет запись трека."""
+        track = self._require_track(track_id)
+        artwork = self.tags.embedded_artwork(track.path)
+        artwork_path = self.artwork_cache.store(artwork)
+        self.database.set_embedded_artwork(track_id, artwork_path)
+        return self._require_track(track_id)
 
     def analyze_track(self, track_id: int) -> TrackRecord:
         """Анализирует один трек и сохраняет результат в SQLite."""

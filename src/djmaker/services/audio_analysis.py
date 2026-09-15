@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import subprocess
 import tempfile
 from pathlib import Path
@@ -15,6 +16,14 @@ from djmaker.runtime.dependencies import RuntimeDependencies
 LOGGER = logging.getLogger(__name__)
 ANALYSIS_SAMPLE_RATE = 44_100
 ANALYSIS_TIMEOUT_SECONDS = 60 * 30
+
+
+def recommended_analysis_concurrency(cpu_count: int | None = None) -> int:
+    """Возвращает безопасное число параллельных FFmpeg/Essentia задач."""
+    processors = cpu_count if cpu_count is not None else (os.cpu_count() or 2)
+    if processors <= 1:
+        return 1
+    return min(4, max(2, processors // 2))
 
 
 class AudioAnalysisError(RuntimeError):

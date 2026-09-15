@@ -8,8 +8,9 @@ import os
 import uuid
 from pathlib import Path
 
-from djmaker.domain.models import InspectedAudio, ScanStats
+from djmaker.domain.models import EmbeddedArtwork, InspectedAudio, ScanStats
 from djmaker.infrastructure.database import LibraryDatabase
+from djmaker.services.artwork import ArtworkCache, ArtworkCacheError
 from djmaker.services.audio_tags import AudioTagError, AudioTagService
 
 
@@ -57,9 +58,15 @@ class ScanError(RuntimeError):
 class LibraryScanner:
     """Индексирует музыкальные файлы в SQLite-медиатеку."""
 
-    def __init__(self, database: LibraryDatabase, tags: AudioTagService) -> None:
+    def __init__(
+        self,
+        database: LibraryDatabase,
+        tags: AudioTagService,
+        artwork_cache: ArtworkCache,
+    ) -> None:
         self.database = database
         self.tags = tags
+        self.artwork_cache = artwork_cache
 
     def scan(self, root: Path) -> ScanStats:
         """Рекурсивно сканирует папку и синхронизирует её с медиатекой."""
@@ -117,6 +124,20 @@ class LibraryScanner:
         except OSError as exc:
             raise ScanError(f"Не удалось вычислить SHA-256 {path}: {exc}") from exc
 
+    def _cache_artwork(
+        self,
+        source: Path,
+        artwork: EmbeddedArtwork | None,
+    ) -> tuple[Path | None, bool]:
+        """Кэширует встроенную обложку, не ломая индексацию при ошибке кэша."""
+        if artwork is None:
+            return None, True
+        try:
+            return self.artwork_cache.store(artwork), True
+        except ArtworkCacheError as exc:
+            LOGGER.warning("Не удалось кэшировать обложку %s: %s", source, exc)
+            return None, False
+
     def _scan_file(
         self,
         root: Path,
@@ -135,6 +156,9 @@ class LibraryScanner:
 
             inspected = self.tags.inspect(path)
             file_hash = self.sha256(path)
+            artwork_path, artwork_checked = self._cache_artwork(
+                path, inspected.artwork
+            )
             self.database.upsert_track(
                 path=path,
                 root=root,
@@ -144,6 +168,8 @@ class LibraryScanner:
                 file_hash=file_hash,
                 metadata=inspected.metadata,
                 technical=inspected.technical,
+                embedded_artwork_path=artwork_path,
+                embedded_artwork_checked=artwork_checked,
                 scan_token=token,
             )
             stats.updated += 1

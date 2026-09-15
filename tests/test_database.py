@@ -125,6 +125,35 @@ class LibraryDatabaseTests(unittest.TestCase):
         self.assertIsNone(updated.analysis)
 
 
+    def test_embedded_artwork_path_is_stored_separately_from_online_url(self) -> None:
+        path = self.root / "cover.mp3"
+        path.write_bytes(b"audio")
+        cover = Path(self.temp.name) / "artwork" / "cover.jpg"
+        stat = path.stat()
+        self.db.upsert_track(
+            path=path,
+            root=self.root,
+            size=stat.st_size,
+            mtime_ns=stat.st_mtime_ns,
+            extension=path.suffix,
+            file_hash="cover-hash",
+            metadata=AudioMetadata(title="Cover"),
+            technical=AudioTechnicalInfo(duration=1.0),
+            scan_token="token",
+            embedded_artwork_path=cover,
+            embedded_artwork_checked=True,
+        )
+        track = self.db.list_tracks()[0]
+        self.db.set_artwork_url(track.id, "https://example.test/cover.jpg")
+
+        updated = self.db.get_track(track.id)
+        self.assertIsNotNone(updated)
+        assert updated is not None
+        self.assertEqual(cover, updated.embedded_artwork_path)
+        self.assertTrue(updated.embedded_artwork_checked)
+        self.assertEqual("https://example.test/cover.jpg", updated.artwork_url)
+
+
 class LibraryDatabaseMigrationTests(unittest.TestCase):
     def test_schema_v1_is_migrated_to_audio_analysis_columns(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -144,11 +173,36 @@ class LibraryDatabaseMigrationTests(unittest.TestCase):
                     for row in conn.execute("PRAGMA table_info(tracks)").fetchall()
                 }
 
-            self.assertEqual(2, version)
+            self.assertEqual(3, version)
             self.assertIn("analysis_bpm", columns)
             self.assertIn("analysis_key", columns)
             self.assertIn("analysis_camelot", columns)
             self.assertIn("analyzed_at", columns)
+            self.assertIn("embedded_artwork_path", columns)
+            self.assertIn("embedded_artwork_checked", columns)
+
+
+    def test_schema_v2_is_migrated_to_embedded_artwork_columns(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "library.sqlite3"
+            with closing(sqlite3.connect(path)) as conn:
+                conn.execute("CREATE TABLE tracks (id INTEGER PRIMARY KEY)")
+                conn.execute("PRAGMA user_version=2")
+                conn.commit()
+
+            database = LibraryDatabase(path)
+            database.initialize()
+
+            with database.connection() as conn:
+                version = conn.execute("PRAGMA user_version").fetchone()[0]
+                columns = {
+                    row["name"]
+                    for row in conn.execute("PRAGMA table_info(tracks)").fetchall()
+                }
+
+            self.assertEqual(3, version)
+            self.assertIn("embedded_artwork_path", columns)
+            self.assertIn("embedded_artwork_checked", columns)
 
 
 if __name__ == "__main__":

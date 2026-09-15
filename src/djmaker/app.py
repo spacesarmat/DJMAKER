@@ -10,6 +10,7 @@ from djmaker.logging_config import configure_logging
 from djmaker.plugins.registry import PluginRegistry
 from djmaker.runtime.dependencies import RuntimeDependencies
 from djmaker.services.audio_analysis import EssentiaAudioAnalyzer
+from djmaker.services.artwork import ArtworkCache
 from djmaker.services.audio_tags import AudioTagService
 from djmaker.services.library import LibraryService
 from djmaker.services.organizer import FileOrganizer
@@ -27,7 +28,8 @@ async def flet_main(page: ft.Page) -> None:
     database = LibraryDatabase(paths.database)
     database.initialize()
     tags = AudioTagService()
-    scanner = LibraryScanner(database, tags)
+    artwork_cache = ArtworkCache(paths.artwork_dir)
+    scanner = LibraryScanner(database, tags, artwork_cache)
     organizer = FileOrganizer()
     plugins = PluginRegistry()
     runtime = RuntimeDependencies(paths.data_dir)
@@ -39,6 +41,7 @@ async def flet_main(page: ft.Page) -> None:
         organizer,
         plugins,
         analyzer,
+        artwork_cache,
     )
     workers = BackgroundWorkers(max_workers=4)
     settings_store = SettingsStore(paths.settings_file)
@@ -55,6 +58,7 @@ async def flet_main(page: ft.Page) -> None:
     )
     ui.build()
     page.run_task(ui.ensure_runtime_dependencies)
+    page.run_task(ui.ensure_embedded_artwork)
 
     def on_disconnect(_: object) -> None:
         workers.close()

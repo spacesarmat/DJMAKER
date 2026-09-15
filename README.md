@@ -16,7 +16,8 @@ DJMAKER — кроссплатформенная desktop-программа на
 - системная, светлая и тёмная тема интерфейса с сохранением выбора;
 - цветовые схемы DJMAKER Blue, Violet, Emerald, Amber и Graphite;
 - автоматическая установка FFmpeg и собственного Essentia runtime;
-- пакетный BPM / Key / Camelot анализ через FFmpeg → Essentia;
+- пакетный многопоточный BPM / Key / Camelot анализ через FFmpeg → Essentia;
+- встроенные обложки MP3/FLAC/M4A с локальным content-addressed кэшем;
 - точки расширения для нормализации и аудио-fingerprint.
 
 ## Требования

@@ -45,6 +45,14 @@ class AudioAnalysis:
     analyzed_at: str = ""
 
 
+@dataclass(frozen=True, slots=True)
+class EmbeddedArtwork:
+    """Встроенная обложка, извлечённая из аудиоконтейнера."""
+
+    data: bytes
+    mime_type: str = ""
+
+
 @dataclass(slots=True)
 class InspectedAudio:
     """Результат локального анализа одного аудиофайла."""
@@ -52,6 +60,7 @@ class InspectedAudio:
     path: Path
     metadata: AudioMetadata
     technical: AudioTechnicalInfo
+    artwork: EmbeddedArtwork | None = None
 
 
 @dataclass(slots=True)
@@ -68,6 +77,8 @@ class TrackRecord:
     metadata: AudioMetadata
     technical: AudioTechnicalInfo
     artwork_url: str | None = None
+    embedded_artwork_path: Path | None = None
+    embedded_artwork_checked: bool = False
     analysis: AudioAnalysis | None = None
 
 

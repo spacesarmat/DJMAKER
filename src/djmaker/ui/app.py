@@ -16,6 +16,7 @@ from djmaker.runtime.dependencies import (
     RuntimeDependencies,
     RuntimeReport,
 )
+from djmaker.services.audio_analysis import recommended_analysis_concurrency
 from djmaker.services.library import LibraryService
 from djmaker.services.workers import BackgroundWorkers
 from djmaker.settings import AppSettings, SettingsStore, THEME_MODES
@@ -378,18 +379,7 @@ class DJMakerUI:
         return self._surface_card(
             ft.Row(
                 controls=[
-                    ft.Container(
-                        width=COMPACT_UI.track_icon_box,
-                        height=COMPACT_UI.track_icon_box,
-                        border_radius=6,
-                        bgcolor=ft.Colors.PRIMARY_CONTAINER,
-                        alignment=ft.Alignment.CENTER,
-                        content=ft.Icon(
-                            ft.Icons.MUSIC_NOTE,
-                            size=COMPACT_UI.track_icon_size,
-                            color=ft.Colors.ON_PRIMARY_CONTAINER,
-                        ),
-                    ),
+                    self._track_artwork(track),
                     ft.Column(
                         controls=[
                             ft.Text(
@@ -454,6 +444,43 @@ class DJMakerUI:
                 spacing=COMPACT_UI.space_sm,
             )
         )
+
+    @staticmethod
+    def _track_artwork(track: TrackRecord) -> ft.Control:
+        """Показывает встроенную обложку, затем online cover и fallback."""
+        fallback = ft.Container(
+            width=COMPACT_UI.track_icon_box,
+            height=COMPACT_UI.track_icon_box,
+            border_radius=6,
+            bgcolor=ft.Colors.PRIMARY_CONTAINER,
+            alignment=ft.Alignment.CENTER,
+            content=ft.Icon(
+                ft.Icons.MUSIC_NOTE,
+                size=COMPACT_UI.track_icon_size,
+                color=ft.Colors.ON_PRIMARY_CONTAINER,
+            ),
+        )
+
+        def image(source: str, error_content: ft.Control) -> ft.Image:
+            return ft.Image(
+                src=source,
+                width=COMPACT_UI.track_icon_box,
+                height=COMPACT_UI.track_icon_box,
+                fit=ft.BoxFit.COVER,
+                border_radius=6,
+                error_content=error_content,
+                cache_width=96,
+                cache_height=96,
+                semantics_label="Обложка альбома",
+            )
+
+        artwork_url = (track.artwork_url or "").strip()
+        remote = image(artwork_url, fallback) if artwork_url else fallback
+
+        embedded = track.embedded_artwork_path
+        if embedded is not None and embedded.is_file():
+            return image(str(embedded), remote)
+        return remote
 
     def show_folders(self) -> None:
         """Отображает корневые папки и действия сканирования."""
@@ -661,7 +688,8 @@ class DJMakerUI:
                                         weight=ft.FontWeight.BOLD,
                                     ),
                                     ft.Text(
-                                        "FFmpeg → mono 44.1 kHz float32 → DJMAKER Essentia",
+                                        "FFmpeg → mono 44.1 kHz float32 → DJMAKER Essentia "
+                                        "· параллельный worker-пул",
                                         size=COMPACT_UI.font_xs,
                                         color=ft.Colors.ON_SURFACE_VARIANT,
                                     ),
@@ -781,22 +809,42 @@ class DJMakerUI:
             self.analysis_progress_text.value = f"0/{total}"
             self.page.update()
 
-            for index, track in enumerate(tracks, start=1):
-                self.status.value = f"BPM / Key: {track.path.name}"
-                try:
-                    await self.workers.run(self.service.analyze_track, track.id)
-                except Exception as exc:
+            parallelism = min(
+                recommended_analysis_concurrency(),
+                self.workers.max_workers,
+                total,
+            )
+            tracks_by_id = {track.id: track for track in tracks}
+            completed = 0
+            self.analysis_progress_text.value = (
+                f"0/{total} · потоков: {parallelism}"
+            )
+            self.page.update()
+
+            async for outcome in self.workers.run_many_unordered(
+                self.service.analyze_track,
+                tracks_by_id,
+                max_concurrency=parallelism,
+            ):
+                completed += 1
+                track = tracks_by_id[outcome.item]
+                if outcome.error is not None:
                     errors += 1
                     LOGGER.warning(
                         "Не удалось проанализировать %s: %s",
                         track.path,
-                        exc,
+                        outcome.error,
                     )
                 else:
                     analyzed += 1
 
-                self.analysis_progress.value = index / total
-                self.analysis_progress_text.value = f"{index}/{total}"
+                self.status.value = (
+                    f"BPM / Key: {completed}/{total} · потоков: {parallelism}"
+                )
+                self.analysis_progress.value = completed / total
+                self.analysis_progress_text.value = (
+                    f"{completed}/{total} · потоков: {parallelism}"
+                )
                 self.page.update()
 
             self._notify(
@@ -826,6 +874,38 @@ class DJMakerUI:
         if analysis.camelot:
             parts.append(analysis.camelot)
         return " · ".join(parts)
+
+    async def ensure_embedded_artwork(self) -> None:
+        """Один раз индексирует встроенные обложки старых записей медиатеки."""
+        try:
+            tracks = await self.workers.run(
+                self.service.tracks_for_artwork_refresh
+            )
+        except Exception:
+            LOGGER.exception("Не удалось получить очередь встроенных обложек")
+            return
+        if not tracks:
+            return
+
+        track_ids = [track.id for track in tracks]
+        concurrency = min(2, self.workers.max_workers)
+        changed = False
+        async for outcome in self.workers.run_many_unordered(
+            self.service.refresh_embedded_artwork,
+            track_ids,
+            max_concurrency=concurrency,
+        ):
+            if outcome.error is not None:
+                LOGGER.warning(
+                    "Не удалось прочитать встроенную обложку track_id=%s: %s",
+                    outcome.item,
+                    outcome.error,
+                )
+            else:
+                changed = True
+
+        if changed and self.navigation.selected_index == 0:
+            self.show_library()
 
     async def ensure_runtime_dependencies(self) -> None:
         """Фоново проверяет и устанавливает FFmpeg/Essentia при запуске."""

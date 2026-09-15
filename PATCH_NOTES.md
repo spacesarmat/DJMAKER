@@ -1,5 +1,10 @@
-# Patch 0015 — close SQLite migration fixture connection
+# Patch 0017 — embedded artwork + parallel BPM/Key
 
-- Исправлен Windows-only сбой очистки `TemporaryDirectory` в тесте миграции БД.
-- `sqlite3.Connection` теперь явно закрывается через `contextlib.closing`.
-- Производственный код SQLite не менялся: дефект находился только в тестовой фикстуре.
+- Чтение встроенных обложек из MP3 (ID3 APIC), FLAC Picture и M4A/MP4 `covr`.
+- Встроенные изображения сохраняются в локальный SHA-256 content-addressed cache.
+- Embedded artwork имеет приоритет над online `artwork_url`; online cover остаётся fallback.
+- Миграция SQLite schema v2 → v3 добавляет путь локальной обложки и флаг её проверки.
+- Для существующей медиатеки встроенные обложки индексируются в фоне один раз после запуска.
+- BPM/Key пакетный анализ выполняется параллельно через существующий `ThreadPoolExecutor`.
+- Число одновременных FFmpeg/Essentia задач выбирается по CPU и ограничено 4 потоками.
+- Ошибка одного трека не останавливает остальные задачи; прогресс обновляется по мере завершения.

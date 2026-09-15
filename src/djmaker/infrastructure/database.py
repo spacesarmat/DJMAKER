@@ -17,7 +17,7 @@ from djmaker.domain.models import (
 )
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 class DatabaseError(RuntimeError):
@@ -44,9 +44,14 @@ class LibraryDatabase:
                     self._create_schema(conn)
                     conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
                     conn.commit()
-                elif version == 1:
-                    self._migrate_v1_to_v2(conn)
-                    conn.execute("PRAGMA user_version=2")
+                else:
+                    if version == 1:
+                        self._migrate_v1_to_v2(conn)
+                        version = 2
+                    if version == 2:
+                        self._migrate_v2_to_v3(conn)
+                        version = 3
+                    conn.execute(f"PRAGMA user_version={version}")
                     conn.commit()
         except sqlite3.Error as exc:
             raise DatabaseError(f"Не удалось инициализировать БД: {exc}") from exc
@@ -105,6 +110,8 @@ class LibraryDatabase:
                 analysis_camelot TEXT NOT NULL DEFAULT '',
                 analyzed_at TEXT,
                 artwork_url TEXT,
+                embedded_artwork_path TEXT,
+                embedded_artwork_checked INTEGER NOT NULL DEFAULT 0,
                 scan_token TEXT NOT NULL DEFAULT '',
                 added_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
@@ -139,6 +146,17 @@ class LibraryDatabase:
             ALTER TABLE tracks ADD COLUMN analysis_key_strength REAL;
             ALTER TABLE tracks ADD COLUMN analysis_camelot TEXT NOT NULL DEFAULT '';
             ALTER TABLE tracks ADD COLUMN analyzed_at TEXT;
+            """
+        )
+
+    @staticmethod
+    def _migrate_v2_to_v3(conn: sqlite3.Connection) -> None:
+        """Добавляет локальный кэш встроенных обложек и флаг индексации."""
+        conn.executescript(
+            """
+            ALTER TABLE tracks ADD COLUMN embedded_artwork_path TEXT;
+            ALTER TABLE tracks ADD COLUMN embedded_artwork_checked
+                INTEGER NOT NULL DEFAULT 0;
             """
         )
 
@@ -221,6 +239,8 @@ class LibraryDatabase:
         metadata: AudioMetadata,
         technical: AudioTechnicalInfo,
         scan_token: str,
+        embedded_artwork_path: Path | None = None,
+        embedded_artwork_checked: bool = False,
     ) -> None:
         """Добавляет новый трек или обновляет существующий."""
         now = self._now()
@@ -245,6 +265,12 @@ class LibraryDatabase:
             metadata.disc_number,
             metadata.bpm,
             metadata.musical_key,
+            (
+                str(embedded_artwork_path)
+                if embedded_artwork_path is not None
+                else None
+            ),
+            int(embedded_artwork_checked),
             scan_token,
             now,
             now,
@@ -259,8 +285,9 @@ class LibraryDatabase:
                         duration, bitrate, sample_rate, channels,
                         title, artist, album, album_artist, genre, year,
                         track_number, disc_number, bpm, musical_key,
+                        embedded_artwork_path, embedded_artwork_checked,
                         scan_token, added_at, updated_at, last_scanned_at
-                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     ON CONFLICT(path) DO UPDATE SET
                         root_path=excluded.root_path,
                         size=excluded.size,
@@ -281,6 +308,8 @@ class LibraryDatabase:
                         disc_number=excluded.disc_number,
                         bpm=excluded.bpm,
                         musical_key=excluded.musical_key,
+                        embedded_artwork_path=excluded.embedded_artwork_path,
+                        embedded_artwork_checked=excluded.embedded_artwork_checked,
                         analysis_bpm=CASE
                             WHEN tracks.file_hash=excluded.file_hash THEN tracks.analysis_bpm
                             ELSE NULL END,
@@ -523,6 +552,45 @@ class LibraryDatabase:
         except sqlite3.Error as exc:
             raise DatabaseError(f"Не удалось сохранить аудио-анализ: {exc}") from exc
 
+    def list_tracks_for_artwork_refresh(self) -> list[TrackRecord]:
+        """Возвращает старые записи, где встроенная обложка ещё не проверялась."""
+        try:
+            with self.connection() as conn:
+                rows = conn.execute(
+                    "SELECT * FROM tracks "
+                    "WHERE embedded_artwork_checked=0 ORDER BY id"
+                ).fetchall()
+        except sqlite3.Error as exc:
+            raise DatabaseError(
+                f"Не удалось получить очередь встроенных обложек: {exc}"
+            ) from exc
+        return [self._row_to_track(row) for row in rows]
+
+    def set_embedded_artwork(
+        self,
+        track_id: int,
+        artwork_path: Path | None,
+    ) -> None:
+        """Сохраняет локальный путь встроенной обложки и отмечает проверку."""
+        try:
+            with self.connection() as conn:
+                cursor = conn.execute(
+                    "UPDATE tracks SET embedded_artwork_path=?, "
+                    "embedded_artwork_checked=1, updated_at=? WHERE id=?",
+                    (
+                        str(artwork_path) if artwork_path is not None else None,
+                        self._now(),
+                        track_id,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise DatabaseError(f"Трек не найден: {track_id}")
+                conn.commit()
+        except sqlite3.Error as exc:
+            raise DatabaseError(
+                f"Не удалось сохранить встроенную обложку: {exc}"
+            ) from exc
+
     def set_artwork_url(self, track_id: int, artwork_url: str | None) -> None:
         """Сохраняет найденный URL обложки для трека."""
         try:
@@ -564,6 +632,12 @@ class LibraryDatabase:
                 channels=row["channels"],
             ),
             artwork_url=row["artwork_url"],
+            embedded_artwork_path=(
+                Path(row["embedded_artwork_path"])
+                if row["embedded_artwork_path"]
+                else None
+            ),
+            embedded_artwork_checked=bool(row["embedded_artwork_checked"]),
             analysis=(
                 AudioAnalysis(
                     bpm=row["analysis_bpm"],
