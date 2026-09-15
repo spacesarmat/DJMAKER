@@ -52,6 +52,7 @@ from djmaker.ui.theme import (
 LOGGER = logging.getLogger(__name__)
 
 _LIBRARY_SEARCH_DEBOUNCE_SECONDS = 0.22
+_PLAYER_SOURCE_LOAD_TIMEOUT_SECONDS = 15.0
 _THEME_EDITOR_MODE_LABELS = {
     "light": "Светлая",
     "dark": "Тёмная",
@@ -149,7 +150,10 @@ class DJMakerUI:
         self._player_state = fta.AudioState.STOPPED
         self._player_position_ms = 0
         self._player_duration_ms = 0
-        self._player_pending_position_ms: int | None = None
+        self._player_switch_lock = asyncio.Lock()
+        self._player_load_event: asyncio.Event | None = None
+        self._player_switching = False
+        self._player_request_revision = 0
 
         self.search = ft.TextField(
             hint_text="Исполнитель, название, альбом, жанр, формат или путь",
@@ -355,73 +359,124 @@ class DJMakerUI:
         return self.audio, source_changed, created
 
     async def _on_player_loaded(self, _: object) -> None:
-        """Запускает новый source только после его загрузки native-плеером."""
-        if self.audio is None or self._player_pending_position_ms is None:
-            return
-        position_ms = self._player_pending_position_ms
-        self._player_pending_position_ms = None
-        try:
-            await self.audio.play(position=ft.Duration(milliseconds=position_ms))
-        except Exception as exc:
-            LOGGER.exception("Не удалось запустить загруженный audio source")
-            self._notify(f"Ошибка плеера: {exc}")
+        """Подтверждает готовность нового native audio source."""
+        load_event = self._player_load_event
+        if load_event is not None:
+            load_event.set()
+
+    def _commit_player_track(
+        self,
+        track: TrackRecord,
+        position_ms: int,
+    ) -> list[ft.Control]:
+        """Атомарно переключает UI плеера на уже загруженный трек."""
+        previous_track_id = self._player_track_id
+        waveform_updates: list[ft.Control] = []
+        if previous_track_id is not None and previous_track_id != track.id:
+            previous_waveform = self._paint_waveform_progress(previous_track_id, 0.0)
+            if previous_waveform is not None:
+                waveform_updates.append(previous_waveform)
+
+        self._player_track_id = track.id
+        self._player_position_ms = max(0, position_ms)
+        self._player_duration_ms = max(
+            0, int((track.technical.duration or 0.0) * 1000)
+        )
+        self._player_state = fta.AudioState.STOPPED
+        artist = track.metadata.artist or "Unknown Artist"
+        title = track.metadata.title or track.path.stem
+        self.player_title.value = f"{artist} - {title}"
+        self.player_bar.visible = True
+        self._refresh_player_controls()
+        current_waveform = self._refresh_waveform_progress()
+        if current_waveform is not None:
+            waveform_updates.append(current_waveform)
+        return waveform_updates
 
     async def _play_track(self, track_id: int, position_ms: int = 0) -> None:
-        """Выбирает трек и запускает воспроизведение с нужной позиции."""
+        """Выбирает трек и плавно запускает его с нужной позиции."""
+        self._player_request_revision += 1
+        request_revision = self._player_request_revision
         await self._select_library_track(track_id)
+        if request_revision != self._player_request_revision:
+            return
+
+        started_switch = False
         try:
             track = await self.workers.run(self.service.track, track_id)
+            if request_revision != self._player_request_revision:
+                return
             if not track.path.is_file():
                 raise RuntimeError(f"Файл не найден: {track.path}")
-            audio, source_changed, audio_created = self._ensure_audio_service(track)
-            previous_track_id = self._player_track_id
-            self._player_track_id = track.id
-            waveform_updates: list[ft.Control] = []
-            if previous_track_id is not None and previous_track_id != track.id:
-                previous_waveform = self._paint_waveform_progress(
-                    previous_track_id, 0.0
-                )
-                if previous_waveform is not None:
-                    waveform_updates.append(previous_waveform)
-            self._player_position_ms = max(0, position_ms)
-            self._player_pending_position_ms = (
-                self._player_position_ms if source_changed else None
-            )
-            if source_changed:
-                self._player_state = fta.AudioState.STOPPED
-            self._player_duration_ms = max(
-                0, int((track.technical.duration or 0.0) * 1000)
-            )
-            artist = track.metadata.artist or "Unknown Artist"
-            title = track.metadata.title or track.path.stem
-            self.player_title.value = f"{artist} - {title}"
-            self.player_bar.visible = True
-            self._refresh_player_controls()
-            current_waveform = self._refresh_waveform_progress()
-            if current_waveform is not None:
-                waveform_updates.append(current_waveform)
 
-            if audio_created:
-                # Первый Audio service нужно смонтировать в дерево страницы.
-                self.page.update()
-            else:
+            async with self._player_switch_lock:
+                if request_revision != self._player_request_revision:
+                    return
+
+                source = track.path.expanduser().resolve()
+                source_changed = self.audio is None or self._player_track_path != source
+                target_position_ms = max(0, position_ms)
+
                 if source_changed:
-                    audio.update()
+                    started_switch = True
+                    self._player_switching = True
+                    if self.audio is not None:
+                        try:
+                            await self.audio.pause()
+                        except Exception:
+                            LOGGER.debug(
+                                "Не удалось приостановить предыдущий source",
+                                exc_info=True,
+                            )
+                    if request_revision != self._player_request_revision:
+                        return
+
+                    self._player_load_event = asyncio.Event()
+                    audio, _, audio_created = self._ensure_audio_service(track)
+                    if audio_created:
+                        # Первый Audio service нужно смонтировать в дерево страницы.
+                        self.page.update()
+                    else:
+                        audio.update()
+
+                    await asyncio.wait_for(
+                        self._player_load_event.wait(),
+                        timeout=_PLAYER_SOURCE_LOAD_TIMEOUT_SECONDS,
+                    )
+                    if request_revision != self._player_request_revision:
+                        return
+                else:
+                    audio, _, _ = self._ensure_audio_service(track)
+
+                waveform_updates = self._commit_player_track(
+                    track,
+                    target_position_ms,
+                )
                 self.page.update(
+                    self.player_bar,
                     self.player_title,
                     self.player_play_button,
                     self.player_position,
                     self.player_progress,
                     *waveform_updates,
                 )
-
-            if not source_changed:
+                if started_switch:
+                    self._player_switching = False
+                    self._player_load_event = None
+                    started_switch = False
                 await audio.play(
-                    position=ft.Duration(milliseconds=self._player_position_ms)
+                    position=ft.Duration(milliseconds=target_position_ms)
                 )
+        except TimeoutError:
+            LOGGER.error("Audio source не загрузился вовремя: track_id=%s", track_id)
+            self._notify("Плеер не успел загрузить выбранный файл")
         except Exception as exc:
             LOGGER.exception("Не удалось воспроизвести трек %s", track_id)
             self._notify(f"Не удалось воспроизвести файл: {exc}")
+        finally:
+            if started_switch:
+                self._player_switching = False
+                self._player_load_event = None
 
     async def _toggle_player(self, _: object) -> None:
         if self.audio is None:
@@ -460,6 +515,8 @@ class DJMakerUI:
             self._notify(f"Ошибка плеера: {exc}")
 
     def _on_player_duration_change(self, event: fta.AudioDurationChangeEvent) -> None:
+        if self._player_switching:
+            return
         self._player_duration_ms = max(0, event.duration.in_milliseconds)
         self._refresh_player_controls()
         controls: list[ft.Control] = [self.player_position, self.player_progress]
@@ -469,6 +526,8 @@ class DJMakerUI:
         self.page.update(*controls)
 
     def _on_player_position_change(self, event: fta.AudioPositionChangeEvent) -> None:
+        if self._player_switching:
+            return
         self._player_position_ms = max(0, int(event.position))
         self._refresh_player_controls()
         controls: list[ft.Control] = [self.player_position, self.player_progress]
@@ -478,6 +537,8 @@ class DJMakerUI:
         self.page.update(*controls)
 
     def _on_player_state_change(self, event: fta.AudioStateChangeEvent) -> None:
+        if self._player_switching:
+            return
         self._player_state = event.state
         if event.state is fta.AudioState.COMPLETED:
             self._player_position_ms = self._player_duration_ms
@@ -1454,7 +1515,7 @@ class DJMakerUI:
         )
         return ft.GestureDetector(
             content=waveform,
-            on_tap_down=lambda event, current=track: self._play_from_waveform(
+            on_tap=lambda event, current=track: self._play_from_waveform(
                 event, current
             ),
             mouse_cursor=ft.MouseCursor.CLICK,
