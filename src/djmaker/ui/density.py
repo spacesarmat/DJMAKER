@@ -53,6 +53,7 @@ class UIDensity:
     waveform_bar_gap: int = 1
     waveform_height: int = 34
     waveform_min_bar_height: int = 3
+    track_center_scroll_ms: int = 360
 
     # Настоящие DataTable, которые будут использоваться далее.
     table_heading_height: int = 28

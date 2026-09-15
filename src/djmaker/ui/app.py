@@ -32,6 +32,7 @@ from djmaker.services.tasks import (
 from djmaker.services.workers import BackgroundWorkers
 from djmaker.settings import AppSettings, SettingsStore, THEME_MODES
 from djmaker.ui.density import COMPACT_UI
+from djmaker.ui.scrolling import centered_scroll_offset
 from djmaker.ui.theme import (
     THEME_MODE_LABELS,
     THEME_PALETTES,
@@ -100,6 +101,12 @@ class DJMakerUI:
         self._artwork_task_contexts: dict[str, _BatchTaskContext] = {}
         self._waveform_task_contexts: dict[str, _WaveformTaskContext] = {}
         self._waveform_views: dict[int, _WaveformView] = {}
+        self._library_list: ft.ListView | None = None
+        self._library_track_indices: dict[int, int] = {}
+        self._track_row_cards: dict[int, ft.Container] = {}
+        self._selected_track_id: int | None = None
+        self._library_viewport_extent = 0.0
+        self._library_max_scroll_extent = 0.0
         self.audio: fta.Audio | None = None
         self._player_track_id: int | None = None
         self._player_track_path: Path | None = None
@@ -315,6 +322,7 @@ class DJMakerUI:
 
     async def _play_track(self, track_id: int, position_ms: int = 0) -> None:
         """Выбирает трек и запускает воспроизведение с нужной позиции."""
+        await self._select_library_track(track_id)
         try:
             track = await self.workers.run(self.service.track, track_id)
             if not track.path.is_file():
@@ -985,6 +993,12 @@ class DJMakerUI:
             spacing=COMPACT_UI.space_sm,
         )
         self._waveform_views.clear()
+        self._track_row_cards.clear()
+        self._library_track_indices = {
+            track.id: index for index, track in enumerate(tracks)
+        }
+        self._library_viewport_extent = 0.0
+        self._library_max_scroll_extent = 0.0
         items: list[ft.Control] = []
         if not tracks:
             items.append(
@@ -994,19 +1008,95 @@ class DJMakerUI:
                     "Добавьте музыкальную папку в разделе «Папки» и запустите сканирование.",
                 )
             )
+            listing = ft.ListView(
+                controls=items,
+                expand=True,
+                spacing=COMPACT_UI.space_sm,
+            )
         else:
             items.extend(self._track_row(track) for track in tracks)
-
-        listing = ft.ListView(
-            controls=items,
-            expand=True,
-            spacing=COMPACT_UI.space_sm,
-        )
+            listing = ft.ListView(
+                controls=items,
+                expand=True,
+                spacing=0,
+                item_extent=self._track_item_extent(),
+                on_scroll=self._on_library_scroll,
+                scroll_interval=50,
+            )
+        self._library_list = listing
         self._replace_content(
             "Медиатека",
             "Поиск, теги и организация локальной музыкальной коллекции",
             actions,
             listing,
+        )
+
+    @staticmethod
+    def _track_item_extent() -> float:
+        """Высота строки медиатеки с межстрочным интервалом."""
+        return float(
+            COMPACT_UI.track_icon_box
+            + COMPACT_UI.card_padding * 2
+            + COMPACT_UI.space_sm
+        )
+
+    def _estimated_library_viewport_extent(self) -> float:
+        """Оценивает viewport до первого scroll-event от Flutter-клиента."""
+        item_extent = self._track_item_extent()
+        page_height = float(self.page.height or self.page.window.height or 640)
+        reserved = 150 if self.player_bar.visible else 115
+        return max(item_extent * 3, page_height - reserved)
+
+    def _on_library_scroll(self, event: ft.OnScrollEvent) -> None:
+        """Запоминает реальные метрики ListView для точной центровки."""
+        self._library_viewport_extent = max(0.0, event.viewport_dimension)
+        self._library_max_scroll_extent = max(0.0, event.max_scroll_extent)
+
+    async def _select_library_track(self, track_id: int) -> None:
+        """Выделяет трек и плавно размещает его по центру списка."""
+        previous_id = self._selected_track_id
+        self._selected_track_id = track_id
+
+        listing = self._library_list
+        index = self._library_track_indices.get(track_id)
+        if listing is None or index is None or self.navigation.selected_index != 0:
+            return
+
+        updates: list[ft.Control] = []
+        if previous_id is not None and previous_id != track_id:
+            previous_card = self._track_row_cards.get(previous_id)
+            if previous_card is not None:
+                previous_card.bgcolor = ft.Colors.SURFACE_CONTAINER_LOW
+                updates.append(previous_card)
+
+        current_card = self._track_row_cards.get(track_id)
+        if current_card is not None:
+            current_card.bgcolor = ft.Colors.SURFACE_CONTAINER_HIGH
+            updates.append(current_card)
+        if updates:
+            self.page.update(*updates)
+
+        item_extent = self._track_item_extent()
+        viewport = (
+            self._library_viewport_extent
+            if self._library_viewport_extent > 0
+            else self._estimated_library_viewport_extent()
+        )
+        estimated_max = max(
+            0.0,
+            len(self._library_track_indices) * item_extent - viewport,
+        )
+        max_scroll = max(self._library_max_scroll_extent, estimated_max)
+        offset = centered_scroll_offset(
+            index=index,
+            item_extent=item_extent,
+            viewport_extent=viewport,
+            max_scroll_extent=max_scroll,
+        )
+        await listing.scroll_to(
+            offset=offset,
+            duration=COMPACT_UI.track_center_scroll_ms,
+            curve=ft.AnimationCurve.EASE_IN_OUT_CUBIC,
         )
 
     def _track_row(self, track: TrackRecord) -> ft.Control:
@@ -1041,7 +1131,7 @@ class DJMakerUI:
             spacing=0,
             alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
         )
-        return self._surface_card(
+        card = self._surface_card(
             ft.Row(
                 controls=[
                     self._track_artwork(track),
@@ -1075,6 +1165,23 @@ class DJMakerUI:
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
                 spacing=COMPACT_UI.space_sm,
             )
+        )
+        card.bgcolor = (
+            ft.Colors.SURFACE_CONTAINER_HIGH
+            if self._selected_track_id == track.id
+            else ft.Colors.SURFACE_CONTAINER_LOW
+        )
+        self._track_row_cards[track.id] = card
+        return ft.Container(
+            height=self._track_item_extent(),
+            padding=ft.Padding.only(bottom=COMPACT_UI.space_sm),
+            content=ft.GestureDetector(
+                content=card,
+                on_tap=lambda _, track_id=track.id: self.page.run_task(
+                    self._select_library_track, track_id
+                ),
+                mouse_cursor=ft.MouseCursor.CLICK,
+            ),
         )
 
     def _track_artwork(self, track: TrackRecord) -> ft.Control:
