@@ -1,12 +1,12 @@
-# DJMAKER patch 0011 — cross-platform Essentia build fixes
+# DJMAKER patch 0012 — pinned Eigen 3.4.0 for Essentia runtime
 
 Исправления:
 
-- macOS Intel/ARM64 bridge теперь получает Eigen include flags через `pkg-config --cflags eigen3`.
-- Windows x64 bridge использует тот же явный Eigen include path.
-- В CI добавлена ранняя проверка наличия `Eigen/Core` и `unsupported/Eigen/CXX11/Tensor`.
-- Для bridge задан `EIGEN_MPL2_ONLY`, согласованный с конфигурацией Essentia.
-- Сохранён MinGW fix `_USE_MATH_DEFINES` из patch 0010.
-- Runtime revision повышен до `2026.08.27-66a890f2-r3`, чтобы не смешивать старые r1/r2 артефакты с исправленной сборкой.
-
-Патч включает исправления Windows из 0010 повторно, поэтому безопасен даже если 0010 не был корректно применён перед этой сборкой.
+- Убрана зависимость Essentia build от системного/Homebrew Eigen.
+- Для Windows x64, macOS Intel и macOS Apple Silicon закреплён Eigen 3.4.0 commit `3147391d946bb4b6c68edd901f2add6ac1f31f8c`.
+- Добавлен собственный `eigen3.pc`, поэтому waf получает одинаковые заголовки Eigen на всех runner-ах.
+- Сохранён Windows MinGW фикс `_USE_MATH_DEFINES`.
+- `actions/checkout` обновлён до v7, `upload-artifact` до v7, `download-artifact` до v8 (Node 24).
+- Runtime revision повышен до `2026.08.27-66a890f2-r4`.
+- Runtime archive теперь содержит лицензию Eigen MPL2.
+- Source release содержит точные исходники и Essentia, и Eigen, использованные для сборки.

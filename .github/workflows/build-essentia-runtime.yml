@@ -8,8 +8,10 @@ permissions:
 
 env:
   ESSENTIA_COMMIT: 66a890f285d0e1988155c12d17a2068e406cdd90
-  ESSENTIA_RUNTIME_VERSION: 2026.08.27-66a890f2-r3
-  ESSENTIA_RELEASE_TAG: essentia-runtime-v2026.08.27-66a890f2-r3
+  EIGEN_COMMIT: 3147391d946bb4b6c68edd901f2add6ac1f31f8c
+  EIGEN_VERSION: 3.4.0
+  ESSENTIA_RUNTIME_VERSION: 2026.08.27-66a890f2-r4
+  ESSENTIA_RELEASE_TAG: essentia-runtime-v2026.08.27-66a890f2-r4
 
 jobs:
   windows-amd64:
@@ -17,23 +19,32 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout DJMAKER
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
-      - name: Install cross compiler and Eigen
+      - name: Install cross compiler and pkg-config
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             g++-mingw-w64-x86-64 \
-            libeigen3-dev \
             pkg-config
-          echo "Eigen CFLAGS: $(pkg-config --cflags eigen3)"
-          test -f "$(pkg-config --variable=includedir eigen3)/Eigen/Core"
-          test -f "$(pkg-config --variable=includedir eigen3)/unsupported/Eigen/CXX11/Tensor"
 
-      - name: Checkout pinned Essentia
+      - name: Checkout pinned Essentia and Eigen
         run: |
           git clone --filter=blob:none https://github.com/MTG/essentia.git vendor/essentia
           git -C vendor/essentia checkout --detach "$ESSENTIA_COMMIT"
+          git clone --filter=blob:none https://github.com/eigenteam/eigen-git-mirror.git vendor/eigen
+          git -C vendor/eigen checkout --detach "$EIGEN_COMMIT"
+          python3 scripts/write_eigen_pkgconfig.py \
+            --eigen-root vendor/eigen \
+            --output vendor/eigen-pkgconfig/eigen3.pc \
+            --version "$EIGEN_VERSION"
+          test -f vendor/eigen/Eigen/Core
+          test -f vendor/eigen/unsupported/Eigen/CXX11/Tensor
+          PKG_CONFIG_PATH="$GITHUB_WORKSPACE/vendor/eigen-pkgconfig" pkg-config --modversion eigen3
+          PKG_CONFIG_PATH="$GITHUB_WORKSPACE/vendor/eigen-pkgconfig" pkg-config --cflags eigen3
+          mkdir -p vendor/essentia/packaging/win32_3rdparty/lib/pkgconfig
+          cp vendor/eigen-pkgconfig/eigen3.pc \
+            vendor/essentia/packaging/win32_3rdparty/lib/pkgconfig/eigen3.pc
 
       - name: Patch upstream MinGW target to x64
         run: python3 scripts/patch_essentia_mingw64.py vendor/essentia/wscript
@@ -66,7 +77,7 @@ jobs:
             -DDJMAKER_ESSENTIA_RUNTIME_VERSION=\"$ESSENTIA_RUNTIME_VERSION\" \
             -DDJMAKER_ESSENTIA_UPSTREAM_SHA=\"$ESSENTIA_COMMIT\" \
             -DEIGEN_MPL2_ONLY \
-            $(pkg-config --cflags eigen3) \
+            -Ivendor/eigen \
             -Ivendor/essentia/src \
             tools/essentia/djmaker_essentia_analyzer.cpp \
             vendor/essentia/build/src/libessentia.a \
@@ -82,10 +93,11 @@ jobs:
             --version "$ESSENTIA_RUNTIME_VERSION" \
             --upstream-sha "$ESSENTIA_COMMIT" \
             --license vendor/essentia/COPYING.txt \
+            --eigen-license vendor/eigen/COPYING.MPL2 \
             --source tools/essentia/djmaker_essentia_analyzer.cpp
 
       - name: Upload Windows runtime
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: essentia-windows-amd64
           path: out/djmaker-essentia-windows-amd64.zip
@@ -97,7 +109,7 @@ jobs:
     runs-on: windows-2025
     steps:
       - name: Download runtime
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: essentia-windows-amd64
           path: artifact
@@ -130,19 +142,25 @@ jobs:
       MACOSX_DEPLOYMENT_TARGET: "13.0"
     steps:
       - name: Checkout DJMAKER
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
-      - name: Install Eigen and pkg-config
-        run: |
-          brew install eigen pkg-config
-          echo "Eigen CFLAGS: $(pkg-config --cflags eigen3)"
-          test -f "$(pkg-config --variable=includedir eigen3)/Eigen/Core"
-          test -f "$(pkg-config --variable=includedir eigen3)/unsupported/Eigen/CXX11/Tensor"
+      - name: Ensure pkg-config
+        run: brew install pkg-config
 
-      - name: Checkout pinned Essentia
+      - name: Checkout pinned Essentia and Eigen
         run: |
           git clone --filter=blob:none https://github.com/MTG/essentia.git vendor/essentia
           git -C vendor/essentia checkout --detach "$ESSENTIA_COMMIT"
+          git clone --filter=blob:none https://github.com/eigenteam/eigen-git-mirror.git vendor/eigen
+          git -C vendor/eigen checkout --detach "$EIGEN_COMMIT"
+          python3 scripts/write_eigen_pkgconfig.py \
+            --eigen-root vendor/eigen \
+            --output vendor/eigen-pkgconfig/eigen3.pc \
+            --version "$EIGEN_VERSION"
+          test -f vendor/eigen/Eigen/Core
+          test -f vendor/eigen/unsupported/Eigen/CXX11/Tensor
+          PKG_CONFIG_PATH="$GITHUB_WORKSPACE/vendor/eigen-pkgconfig" pkg-config --modversion eigen3
+          PKG_CONFIG_PATH="$GITHUB_WORKSPACE/vendor/eigen-pkgconfig" pkg-config --cflags eigen3
 
       - name: Configure lightweight Essentia
         working-directory: vendor/essentia
@@ -153,7 +171,8 @@ jobs:
             --fft=KISS \
             --mode=release \
             --std=c++17 \
-            --arch=${{ matrix.waf_arch }}
+            --arch=${{ matrix.waf_arch }} \
+            --pkg-config-path="$GITHUB_WORKSPACE/vendor/eigen-pkgconfig"
 
       - name: Build Essentia
         working-directory: vendor/essentia
@@ -169,7 +188,7 @@ jobs:
             -DDJMAKER_ESSENTIA_RUNTIME_VERSION=\"$ESSENTIA_RUNTIME_VERSION\" \
             -DDJMAKER_ESSENTIA_UPSTREAM_SHA=\"$ESSENTIA_COMMIT\" \
             -DEIGEN_MPL2_ONLY \
-            $(pkg-config --cflags eigen3) \
+            -Ivendor/eigen \
             -Ivendor/essentia/src \
             tools/essentia/djmaker_essentia_analyzer.cpp \
             vendor/essentia/build/src/libessentia.a \
@@ -191,10 +210,11 @@ jobs:
             --version "$ESSENTIA_RUNTIME_VERSION" \
             --upstream-sha "$ESSENTIA_COMMIT" \
             --license vendor/essentia/COPYING.txt \
+            --eigen-license vendor/eigen/COPYING.MPL2 \
             --source tools/essentia/djmaker_essentia_analyzer.cpp
 
       - name: Upload macOS runtime
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: essentia-darwin-${{ matrix.arch }}
           path: out/djmaker-essentia-darwin-${{ matrix.arch }}.tar.gz
@@ -208,10 +228,10 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout DJMAKER
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Download runtime artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: essentia-*
           path: dist
@@ -221,12 +241,15 @@ jobs:
         run: |
           git clone --filter=blob:none https://github.com/MTG/essentia.git source/essentia
           git -C source/essentia checkout --detach "$ESSENTIA_COMMIT"
-          rm -rf source/essentia/.git
+          git clone --filter=blob:none https://github.com/eigenteam/eigen-git-mirror.git source/eigen
+          git -C source/eigen checkout --detach "$EIGEN_COMMIT"
+          rm -rf source/essentia/.git source/eigen/.git
           mkdir -p source/djmaker
           cp tools/essentia/djmaker_essentia_analyzer.cpp source/djmaker/
           cp scripts/patch_essentia_mingw64.py source/djmaker/
+          cp scripts/write_eigen_pkgconfig.py source/djmaker/
           cp docs/ESSENTIA_RUNTIME_BUILD.md source/djmaker/
-          tar -C source -czf "dist/djmaker-essentia-source-${ESSENTIA_RUNTIME_VERSION}.tar.gz" essentia djmaker
+          tar -C source -czf "dist/djmaker-essentia-source-${ESSENTIA_RUNTIME_VERSION}.tar.gz" essentia eigen djmaker
 
       - name: Generate release checksums
         working-directory: dist
@@ -244,5 +267,5 @@ jobs:
           else
             gh release create "$ESSENTIA_RELEASE_TAG" dist/* \
               --title "DJMAKER Essentia Runtime ${ESSENTIA_RUNTIME_VERSION}" \
-              --notes "Pinned Essentia ${ESSENTIA_COMMIT}. Lightweight KISS FFT build. FFmpeg performs audio decoding; this runtime provides BPM/Key DSP. Corresponding source is attached."
+              --notes "Pinned Essentia ${ESSENTIA_COMMIT} and Eigen ${EIGEN_COMMIT}. Lightweight KISS FFT build. FFmpeg performs audio decoding; this runtime provides BPM/Key DSP. Corresponding source is attached."
           fi

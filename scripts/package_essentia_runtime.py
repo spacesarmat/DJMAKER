@@ -57,6 +57,7 @@ def make_archive(
     upstream_sha: str,
     license_file: Path,
     analyzer_source: Path,
+    eigen_license_file: Path,
 ) -> None:
     if not binary.is_file():
         raise FileNotFoundError(binary)
@@ -64,6 +65,8 @@ def make_archive(
         raise FileNotFoundError(license_file)
     if not analyzer_source.is_file():
         raise FileNotFoundError(analyzer_source)
+    if not eigen_license_file.is_file():
+        raise FileNotFoundError(eigen_license_file)
 
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory() as temp_name:
@@ -76,6 +79,7 @@ def make_archive(
             target.chmod(target.stat().st_mode | 0o755)
 
         (root / "COPYING-ESSENTIA.txt").write_bytes(license_file.read_bytes())
+        (root / "COPYING-EIGEN-MPL2.txt").write_bytes(eigen_license_file.read_bytes())
         (root / "djmaker_essentia_analyzer.cpp").write_bytes(analyzer_source.read_bytes())
         write_manifest(
             root / "manifest.json",
@@ -112,6 +116,7 @@ def main() -> int:
     parser.add_argument("--upstream-sha", required=True)
     parser.add_argument("--license", type=Path, required=True)
     parser.add_argument("--source", type=Path, required=True)
+    parser.add_argument("--eigen-license", type=Path, required=True)
     args = parser.parse_args()
 
     make_archive(
@@ -123,6 +128,7 @@ def main() -> int:
         upstream_sha=args.upstream_sha,
         license_file=args.license,
         analyzer_source=args.source,
+        eigen_license_file=args.eigen_license,
     )
     print(f"{sha256(args.output)}  {args.output.name}")
     return 0

@@ -8,7 +8,8 @@ DJMAKER не использует старые 32-битные Windows extractor
 - Репозиторий: `MTG/essentia`
 - Commit: `66a890f285d0e1988155c12d17a2068e406cdd90`
 - Дата upstream commit: 2026-08-27
-- DJMAKER runtime: `2026.08.27-66a890f2-r3`
+- DJMAKER runtime: `2026.08.27-66a890f2-r4`
+- Eigen: `3.4.0`, commit `3147391d946bb4b6c68edd901f2add6ac1f31f8c`
 
 Не используется плавающая ветка `master` во время фактической компиляции. Это делает
 результат воспроизводимым и не позволяет внезапному upstream-изменению сломать
@@ -70,7 +71,7 @@ Workflow `.github/workflows/build-essentia-runtime.yml` запускается �
 или обновляет release:
 
 ```text
-essentia-runtime-v2026.08.27-66a890f2-r3
+essentia-runtime-v2026.08.27-66a890f2-r4
 ```
 
 Release содержит:
@@ -79,7 +80,7 @@ Release содержит:
 djmaker-essentia-windows-amd64.zip
 djmaker-essentia-darwin-amd64.tar.gz
 djmaker-essentia-darwin-arm64.tar.gz
-djmaker-essentia-source-2026.08.27-66a890f2-r3.tar.gz
+djmaker-essentia-source-2026.08.27-66a890f2-r4.tar.gz
 SHA256SUMS.txt
 ```
 

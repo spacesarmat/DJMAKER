@@ -56,7 +56,7 @@ class RuntimeDependencyHelpersTests(unittest.TestCase):
 
     def test_essentia_runtime_revision_matches_build_recipe(self) -> None:
         self.assertEqual(
-            "2026.08.27-66a890f2-r3",
+            "2026.08.27-66a890f2-r4",
             ESSENTIA_RUNTIME_VERSION,
         )
 
