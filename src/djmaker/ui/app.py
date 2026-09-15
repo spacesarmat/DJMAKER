@@ -11,6 +11,11 @@ import flet as ft
 from djmaker.config import DEFAULT_ORGANIZE_TEMPLATE, DEFAULT_TARGET_LUFS, AppPaths
 from djmaker.domain.models import AudioMetadata, MetadataCandidate, TrackRecord
 from djmaker.plugins.base import MetadataProviderError
+from djmaker.runtime.dependencies import (
+    DependencyStatus,
+    RuntimeDependencies,
+    RuntimeReport,
+)
 from djmaker.services.library import LibraryService
 from djmaker.services.workers import BackgroundWorkers
 from djmaker.settings import AppSettings, SettingsStore, THEME_MODES
@@ -38,6 +43,7 @@ class DJMakerUI:
         paths: AppPaths,
         settings_store: SettingsStore,
         settings: AppSettings,
+        runtime: RuntimeDependencies,
     ) -> None:
         self.page = page
         self.service = service
@@ -45,6 +51,8 @@ class DJMakerUI:
         self.paths = paths
         self.settings_store = settings_store
         self.settings = settings
+        self.runtime = runtime
+        self.runtime_report = runtime.probe()
 
         self.search = ft.TextField(
             hint_text="Поиск в медиатеке",
@@ -635,6 +643,99 @@ class DJMakerUI:
             *controls,
         )
 
+    async def ensure_runtime_dependencies(self) -> None:
+        """Фоново проверяет и устанавливает FFmpeg/Essentia при запуске."""
+        self._set_status("Проверка FFmpeg и Essentia...")
+        try:
+            report = await self.workers.run(self.runtime.ensure_all)
+        except Exception as exc:
+            LOGGER.exception("Ошибка проверки runtime-зависимостей")
+            self._notify(f"Ошибка проверки аудио-компонентов: {exc}")
+            return
+
+        self.runtime_report = report
+        problems = [
+            status.name
+            for status in (report.ffmpeg, report.essentia)
+            if not status.available
+        ]
+        if problems:
+            self._set_status(
+                "Аудио-компоненты требуют внимания: " + ", ".join(problems)
+            )
+        else:
+            self._set_status(
+                f"FFmpeg {report.ffmpeg.version} · Essentia {report.essentia.version}"
+            )
+
+        if self.navigation.selected_index == 5:
+            self.show_settings()
+
+    def _retry_runtime_dependencies(self, _: object) -> None:
+        """Повторно запускает проверку/установку из экрана настроек."""
+        self.page.run_task(self.ensure_runtime_dependencies)
+
+    def _runtime_card(self, report: RuntimeReport) -> ft.Control:
+        """Создаёт карточку состояния FFmpeg и Essentia."""
+        return self._surface_card(
+            ft.Column(
+                controls=[
+                    ft.Row(
+                        controls=[
+                            ft.Icon(ft.Icons.CONSTRUCTION, color=ft.Colors.PRIMARY),
+                            ft.Text(
+                                "Аудио-компоненты",
+                                size=COMPACT_UI.font_lg,
+                                weight=ft.FontWeight.BOLD,
+                            ),
+                            ft.Container(expand=True),
+                            ft.Button(
+                                content="Проверить / установить",
+                                icon=ft.Icons.DOWNLOAD,
+                                on_click=self._retry_runtime_dependencies,
+                            ),
+                        ]
+                    ),
+                    self._runtime_status_row(report.ffmpeg),
+                    self._runtime_status_row(report.essentia),
+                    ft.Text(
+                        "FFmpeg декодирует аудио. Essentia используется как собственная "
+                        "lightweight-сборка DJMAKER с KISS FFT и загружается из Releases "
+                        "этого репозитория после проверки SHA-256.",
+                        size=COMPACT_UI.font_xs,
+                        color=ft.Colors.ON_SURFACE_VARIANT,
+                    ),
+                ],
+                spacing=COMPACT_UI.space_sm,
+            )
+        )
+
+    @staticmethod
+    def _runtime_status_row(status: DependencyStatus) -> ft.Control:
+        icon = ft.Icons.CHECK_CIRCLE if status.available else ft.Icons.ERROR_OUTLINE
+        color = ft.Colors.PRIMARY if status.available else ft.Colors.ERROR
+        state = "Готов" if status.available else "Недоступен"
+        version = f" · {status.version}" if status.version else ""
+        backend = f" · {status.backend}" if status.backend else ""
+        detail = status.detail or status.path
+        return ft.Row(
+            controls=[
+                ft.Icon(icon, size=COMPACT_UI.action_icon_size, color=color),
+                ft.Text(
+                    f"{status.name}: {state}{version}{backend}",
+                    weight=ft.FontWeight.BOLD,
+                    size=COMPACT_UI.font_sm,
+                ),
+                ft.Text(
+                    detail,
+                    expand=True,
+                    size=COMPACT_UI.font_xs,
+                    color=ft.Colors.ON_SURFACE_VARIANT,
+                ),
+            ],
+            spacing=COMPACT_UI.space_sm,
+        )
+
     def show_settings(self) -> None:
         """Показывает настройки оформления и локальные пути приложения."""
         self._set_navigation_index(5)
@@ -719,6 +820,7 @@ class DJMakerUI:
         self._replace_content(
             "Настройки",
             f"Тема: {THEME_MODE_LABELS[self.settings.theme_mode]} · {palette_title(self.settings.theme_palette)}",
+            self._runtime_card(self.runtime_report),
             appearance,
             storage,
             organizer,

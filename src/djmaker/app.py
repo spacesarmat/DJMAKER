@@ -8,6 +8,7 @@ from djmaker.config import get_app_paths
 from djmaker.infrastructure.database import LibraryDatabase
 from djmaker.logging_config import configure_logging
 from djmaker.plugins.registry import PluginRegistry
+from djmaker.runtime.dependencies import RuntimeDependencies
 from djmaker.services.audio_tags import AudioTagService
 from djmaker.services.library import LibraryService
 from djmaker.services.organizer import FileOrganizer
@@ -32,9 +33,19 @@ async def flet_main(page: ft.Page) -> None:
     workers = BackgroundWorkers(max_workers=4)
     settings_store = SettingsStore(paths.settings_file)
     settings = settings_store.load()
+    runtime = RuntimeDependencies(paths.data_dir)
 
-    ui = DJMakerUI(page, service, workers, paths, settings_store, settings)
+    ui = DJMakerUI(
+        page,
+        service,
+        workers,
+        paths,
+        settings_store,
+        settings,
+        runtime,
+    )
     ui.build()
+    page.run_task(ui.ensure_runtime_dependencies)
 
     def on_disconnect(_: object) -> None:
         workers.close()

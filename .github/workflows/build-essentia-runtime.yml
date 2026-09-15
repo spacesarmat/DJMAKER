@@ -1,0 +1,236 @@
+name: Build Essentia Runtime
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  ESSENTIA_COMMIT: 66a890f285d0e1988155c12d17a2068e406cdd90
+  ESSENTIA_RUNTIME_VERSION: 2026.08.27-66a890f2-r1
+  ESSENTIA_RELEASE_TAG: essentia-runtime-v2026.08.27-66a890f2-r1
+
+jobs:
+  windows-amd64:
+    name: Windows x64 build
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout DJMAKER
+        uses: actions/checkout@v4
+
+      - name: Install cross compiler and Eigen
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            g++-mingw-w64-x86-64 \
+            libeigen3-dev \
+            pkg-config
+
+      - name: Checkout pinned Essentia
+        run: |
+          git clone --filter=blob:none https://github.com/MTG/essentia.git vendor/essentia
+          git -C vendor/essentia checkout --detach "$ESSENTIA_COMMIT"
+
+      - name: Patch upstream MinGW target to x64
+        run: python3 scripts/patch_essentia_mingw64.py vendor/essentia/wscript
+
+      - name: Configure lightweight Essentia
+        working-directory: vendor/essentia
+        run: |
+          python3 waf configure \
+            --build-static \
+            --lightweight= \
+            --fft=KISS \
+            --cross-compile-mingw32 \
+            --mode=release \
+            --std=c++17
+
+      - name: Build Essentia
+        working-directory: vendor/essentia
+        run: python3 waf -j2
+
+      - name: Build DJMAKER Essentia bridge
+        run: |
+          mkdir -p out/windows-amd64
+          x86_64-w64-mingw32-g++ \
+            -O2 \
+            -std=c++17 \
+            -static \
+            -static-libgcc \
+            -static-libstdc++ \
+            -DDJMAKER_ESSENTIA_RUNTIME_VERSION=\"$ESSENTIA_RUNTIME_VERSION\" \
+            -DDJMAKER_ESSENTIA_UPSTREAM_SHA=\"$ESSENTIA_COMMIT\" \
+            -Ivendor/essentia/src \
+            tools/essentia/djmaker_essentia_analyzer.cpp \
+            vendor/essentia/build/src/libessentia.a \
+            -o out/windows-amd64/djmaker-essentia.exe
+
+      - name: Package Windows runtime
+        run: |
+          python3 scripts/package_essentia_runtime.py \
+            --binary out/windows-amd64/djmaker-essentia.exe \
+            --output out/djmaker-essentia-windows-amd64.zip \
+            --platform windows \
+            --arch amd64 \
+            --version "$ESSENTIA_RUNTIME_VERSION" \
+            --upstream-sha "$ESSENTIA_COMMIT" \
+            --license vendor/essentia/COPYING.txt \
+            --source tools/essentia/djmaker_essentia_analyzer.cpp
+
+      - name: Upload Windows runtime
+        uses: actions/upload-artifact@v4
+        with:
+          name: essentia-windows-amd64
+          path: out/djmaker-essentia-windows-amd64.zip
+          if-no-files-found: error
+
+  test-windows-amd64:
+    name: Windows x64 smoke test
+    needs: windows-amd64
+    runs-on: windows-2025
+    steps:
+      - name: Download runtime
+        uses: actions/download-artifact@v4
+        with:
+          name: essentia-windows-amd64
+          path: artifact
+
+      - name: Extract and run self-test
+        shell: pwsh
+        run: |
+          Expand-Archive artifact/djmaker-essentia-windows-amd64.zip -DestinationPath runtime -Force
+          $Exe = Get-ChildItem runtime -Recurse -Filter djmaker-essentia.exe | Select-Object -First 1
+          if (-not $Exe) { throw "djmaker-essentia.exe not found" }
+          & $Exe.FullName --version
+          if ($LASTEXITCODE -ne 0) { throw "Version probe failed" }
+          & $Exe.FullName --self-test
+          if ($LASTEXITCODE -ne 0) { throw "Essentia self-test failed" }
+
+  macos:
+    name: macOS ${{ matrix.arch }} build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: macos-15-intel
+            waf_arch: x64
+          - arch: arm64
+            runner: macos-15
+            waf_arch: arm64
+    runs-on: ${{ matrix.runner }}
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "13.0"
+    steps:
+      - name: Checkout DJMAKER
+        uses: actions/checkout@v4
+
+      - name: Install Eigen and pkg-config
+        run: brew install eigen pkg-config
+
+      - name: Checkout pinned Essentia
+        run: |
+          git clone --filter=blob:none https://github.com/MTG/essentia.git vendor/essentia
+          git -C vendor/essentia checkout --detach "$ESSENTIA_COMMIT"
+
+      - name: Configure lightweight Essentia
+        working-directory: vendor/essentia
+        run: |
+          python3 waf configure \
+            --build-static \
+            --lightweight= \
+            --fft=KISS \
+            --mode=release \
+            --std=c++17 \
+            --arch=${{ matrix.waf_arch }}
+
+      - name: Build Essentia
+        working-directory: vendor/essentia
+        run: python3 waf -j2
+
+      - name: Build DJMAKER Essentia bridge
+        run: |
+          mkdir -p out/macos-${{ matrix.arch }}
+          c++ \
+            -O2 \
+            -std=c++17 \
+            -mmacosx-version-min=13.0 \
+            -DDJMAKER_ESSENTIA_RUNTIME_VERSION=\"$ESSENTIA_RUNTIME_VERSION\" \
+            -DDJMAKER_ESSENTIA_UPSTREAM_SHA=\"$ESSENTIA_COMMIT\" \
+            -Ivendor/essentia/src \
+            tools/essentia/djmaker_essentia_analyzer.cpp \
+            vendor/essentia/build/src/libessentia.a \
+            -o out/macos-${{ matrix.arch }}/djmaker-essentia
+          chmod +x out/macos-${{ matrix.arch }}/djmaker-essentia
+
+      - name: Native smoke test
+        run: |
+          out/macos-${{ matrix.arch }}/djmaker-essentia --version
+          out/macos-${{ matrix.arch }}/djmaker-essentia --self-test
+
+      - name: Package macOS runtime
+        run: |
+          python3 scripts/package_essentia_runtime.py \
+            --binary out/macos-${{ matrix.arch }}/djmaker-essentia \
+            --output out/djmaker-essentia-darwin-${{ matrix.arch }}.tar.gz \
+            --platform darwin \
+            --arch ${{ matrix.arch }} \
+            --version "$ESSENTIA_RUNTIME_VERSION" \
+            --upstream-sha "$ESSENTIA_COMMIT" \
+            --license vendor/essentia/COPYING.txt \
+            --source tools/essentia/djmaker_essentia_analyzer.cpp
+
+      - name: Upload macOS runtime
+        uses: actions/upload-artifact@v4
+        with:
+          name: essentia-darwin-${{ matrix.arch }}
+          path: out/djmaker-essentia-darwin-${{ matrix.arch }}.tar.gz
+          if-no-files-found: error
+
+  publish:
+    name: Publish Essentia runtime release
+    needs:
+      - test-windows-amd64
+      - macos
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout DJMAKER
+        uses: actions/checkout@v4
+
+      - name: Download runtime artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: essentia-*
+          path: dist
+          merge-multiple: true
+
+      - name: Build corresponding source archive
+        run: |
+          git clone --filter=blob:none https://github.com/MTG/essentia.git source/essentia
+          git -C source/essentia checkout --detach "$ESSENTIA_COMMIT"
+          rm -rf source/essentia/.git
+          mkdir -p source/djmaker
+          cp tools/essentia/djmaker_essentia_analyzer.cpp source/djmaker/
+          cp scripts/patch_essentia_mingw64.py source/djmaker/
+          cp docs/ESSENTIA_RUNTIME_BUILD.md source/djmaker/
+          tar -C source -czf "dist/djmaker-essentia-source-${ESSENTIA_RUNTIME_VERSION}.tar.gz" essentia djmaker
+
+      - name: Generate release checksums
+        working-directory: dist
+        run: sha256sum *.zip *.tar.gz > SHA256SUMS.txt
+
+      - name: Show produced files
+        run: ls -lh dist && cat dist/SHA256SUMS.txt
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$ESSENTIA_RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$ESSENTIA_RELEASE_TAG" dist/* --clobber
+          else
+            gh release create "$ESSENTIA_RELEASE_TAG" dist/* \
+              --title "DJMAKER Essentia Runtime ${ESSENTIA_RUNTIME_VERSION}" \
+              --notes "Pinned Essentia ${ESSENTIA_COMMIT}. Lightweight KISS FFT build. FFmpeg performs audio decoding; this runtime provides BPM/Key DSP. Corresponding source is attached."
+          fi
