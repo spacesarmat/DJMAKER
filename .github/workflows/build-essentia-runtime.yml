@@ -8,8 +8,8 @@ permissions:
 
 env:
   ESSENTIA_COMMIT: 66a890f285d0e1988155c12d17a2068e406cdd90
-  ESSENTIA_RUNTIME_VERSION: 2026.08.27-66a890f2-r1
-  ESSENTIA_RELEASE_TAG: essentia-runtime-v2026.08.27-66a890f2-r1
+  ESSENTIA_RUNTIME_VERSION: 2026.08.27-66a890f2-r3
+  ESSENTIA_RELEASE_TAG: essentia-runtime-v2026.08.27-66a890f2-r3
 
 jobs:
   windows-amd64:
@@ -26,6 +26,9 @@ jobs:
             g++-mingw-w64-x86-64 \
             libeigen3-dev \
             pkg-config
+          echo "Eigen CFLAGS: $(pkg-config --cflags eigen3)"
+          test -f "$(pkg-config --variable=includedir eigen3)/Eigen/Core"
+          test -f "$(pkg-config --variable=includedir eigen3)/unsupported/Eigen/CXX11/Tensor"
 
       - name: Checkout pinned Essentia
         run: |
@@ -56,11 +59,14 @@ jobs:
           x86_64-w64-mingw32-g++ \
             -O2 \
             -std=c++17 \
+            -D_USE_MATH_DEFINES \
             -static \
             -static-libgcc \
             -static-libstdc++ \
             -DDJMAKER_ESSENTIA_RUNTIME_VERSION=\"$ESSENTIA_RUNTIME_VERSION\" \
             -DDJMAKER_ESSENTIA_UPSTREAM_SHA=\"$ESSENTIA_COMMIT\" \
+            -DEIGEN_MPL2_ONLY \
+            $(pkg-config --cflags eigen3) \
             -Ivendor/essentia/src \
             tools/essentia/djmaker_essentia_analyzer.cpp \
             vendor/essentia/build/src/libessentia.a \
@@ -127,7 +133,11 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install Eigen and pkg-config
-        run: brew install eigen pkg-config
+        run: |
+          brew install eigen pkg-config
+          echo "Eigen CFLAGS: $(pkg-config --cflags eigen3)"
+          test -f "$(pkg-config --variable=includedir eigen3)/Eigen/Core"
+          test -f "$(pkg-config --variable=includedir eigen3)/unsupported/Eigen/CXX11/Tensor"
 
       - name: Checkout pinned Essentia
         run: |
@@ -158,6 +168,8 @@ jobs:
             -mmacosx-version-min=13.0 \
             -DDJMAKER_ESSENTIA_RUNTIME_VERSION=\"$ESSENTIA_RUNTIME_VERSION\" \
             -DDJMAKER_ESSENTIA_UPSTREAM_SHA=\"$ESSENTIA_COMMIT\" \
+            -DEIGEN_MPL2_ONLY \
+            $(pkg-config --cflags eigen3) \
             -Ivendor/essentia/src \
             tools/essentia/djmaker_essentia_analyzer.cpp \
             vendor/essentia/build/src/libessentia.a \

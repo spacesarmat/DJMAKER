@@ -42,7 +42,19 @@ class EssentiaBuildToolsTests(unittest.TestCase):
         self.assertNotIn("i686-w64-mingw32", patched)
         self.assertEqual(3, patched.count("x86_64-w64-mingw32"))
         self.assertEqual(1, patched.count("ctx.env.CXXFLAGS +="))
+        self.assertIn("-D_USE_MATH_DEFINES", patched)
         self.assertEqual(1, patched.count("ctx.env.CXXFLAGS = ['-static-libgcc'"))
+
+    def test_windows_workflow_enables_mingw_math_constants(self) -> None:
+        workflow = (
+            PROJECT_ROOT / ".github" / "workflows" / "build-essentia-runtime.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("ESSENTIA_RUNTIME_VERSION: 2026.08.27-66a890f2-r3", workflow)
+        self.assertIn("-D_USE_MATH_DEFINES", workflow)
+        self.assertGreaterEqual(workflow.count("pkg-config --cflags eigen3"), 2)
+        self.assertGreaterEqual(workflow.count("unsupported/Eigen/CXX11/Tensor"), 2)
+        self.assertGreaterEqual(workflow.count("-DEIGEN_MPL2_ONLY"), 2)
 
     def test_runtime_packager_writes_manifest_and_source(self) -> None:
         module = load_script("package_essentia_runtime.py")

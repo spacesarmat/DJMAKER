@@ -14,11 +14,11 @@ from pathlib import Path
 I686 = "i686-w64-mingw32"
 X64 = "x86_64-w64-mingw32"
 RESET_FLAGS = "ctx.env.CXXFLAGS = ['-static-libgcc', '-static-libstdc++']"
-APPEND_FLAGS = "ctx.env.CXXFLAGS += ['-static-libgcc', '-static-libstdc++']"
+APPEND_FLAGS = "ctx.env.CXXFLAGS += ['-static-libgcc', '-static-libstdc++', '-D_USE_MATH_DEFINES']"
 
 
 def patch_wscript(path: Path) -> None:
-    """Патчит wscript и аварийно завершает работу при изменении upstream-контекста."""
+    """Патчит MinGW x64 toolchain и включает математические константы CRT."""
     source = path.read_text(encoding="utf-8")
     compiler_occurrences = source.count(I686)
     reset_occurrences = source.count(RESET_FLAGS)

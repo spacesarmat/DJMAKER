@@ -54,6 +54,12 @@ class RuntimeDependencyHelpersTests(unittest.TestCase):
         self.assertIsNone(_essentia_asset_name("Windows", "arm64"))
         self.assertIsNone(_essentia_asset_name("Linux", "x86_64"))
 
+    def test_essentia_runtime_revision_matches_build_recipe(self) -> None:
+        self.assertEqual(
+            "2026.08.27-66a890f2-r3",
+            ESSENTIA_RUNTIME_VERSION,
+        )
+
     def test_essentia_runtime_is_pinned_to_exact_upstream_commit(self) -> None:
         self.assertEqual(40, len(ESSENTIA_UPSTREAM_SHA))
         self.assertRegex(ESSENTIA_UPSTREAM_SHA, r"^[0-9a-f]{40}$")
