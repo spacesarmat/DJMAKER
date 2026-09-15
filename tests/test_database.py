@@ -6,7 +6,12 @@ from contextlib import closing
 import unittest
 from pathlib import Path
 
-from djmaker.domain.models import AudioAnalysis, AudioMetadata, AudioTechnicalInfo
+from djmaker.domain.models import (
+    AudioAnalysis,
+    AudioMetadata,
+    AudioTechnicalInfo,
+    WaveformAnalysis,
+)
 from djmaker.infrastructure.database import LibraryDatabase
 
 
@@ -125,6 +130,50 @@ class LibraryDatabaseTests(unittest.TestCase):
         self.assertIsNone(updated.analysis)
 
 
+    def test_waveform_is_saved_and_loaded_separately(self) -> None:
+        self._insert("wave.mp3", "wave-hash")
+        track = self.db.list_tracks()[0]
+
+        self.db.save_waveform_analysis(
+            track.id,
+            WaveformAnalysis(peaks=(0.0, 0.25, 0.5, 1.0)),
+        )
+
+        updated = self.db.get_track(track.id)
+        self.assertIsNotNone(updated)
+        assert updated is not None
+        self.assertIsNotNone(updated.waveform)
+        assert updated.waveform is not None
+        self.assertEqual((0.0, 0.25, 0.5, 1.0), updated.waveform.peaks)
+        self.assertTrue(updated.waveform.analyzed_at)
+        self.assertEqual((1, 1), self.db.waveform_counts())
+
+    def test_changed_file_hash_invalidates_previous_waveform(self) -> None:
+        self._insert("wave.mp3", "wave-hash")
+        track = self.db.list_tracks()[0]
+        self.db.save_waveform_analysis(
+            track.id,
+            WaveformAnalysis(peaks=(0.2, 0.8)),
+        )
+        stat = track.path.stat()
+
+        self.db.upsert_track(
+            path=track.path,
+            root=self.root,
+            size=stat.st_size,
+            mtime_ns=stat.st_mtime_ns,
+            extension=track.path.suffix,
+            file_hash="wave-changed",
+            metadata=track.metadata,
+            technical=track.technical,
+            scan_token="next",
+        )
+
+        updated = self.db.get_track(track.id)
+        self.assertIsNotNone(updated)
+        assert updated is not None
+        self.assertIsNone(updated.waveform)
+
     def test_embedded_artwork_path_is_stored_separately_from_online_url(self) -> None:
         path = self.root / "cover.mp3"
         path.write_bytes(b"audio")
@@ -173,13 +222,15 @@ class LibraryDatabaseMigrationTests(unittest.TestCase):
                     for row in conn.execute("PRAGMA table_info(tracks)").fetchall()
                 }
 
-            self.assertEqual(3, version)
+            self.assertEqual(4, version)
             self.assertIn("analysis_bpm", columns)
             self.assertIn("analysis_key", columns)
             self.assertIn("analysis_camelot", columns)
             self.assertIn("analyzed_at", columns)
             self.assertIn("embedded_artwork_path", columns)
             self.assertIn("embedded_artwork_checked", columns)
+            self.assertIn("waveform_peaks", columns)
+            self.assertIn("waveform_analyzed_at", columns)
 
 
     def test_schema_v2_is_migrated_to_embedded_artwork_columns(self) -> None:
@@ -200,9 +251,33 @@ class LibraryDatabaseMigrationTests(unittest.TestCase):
                     for row in conn.execute("PRAGMA table_info(tracks)").fetchall()
                 }
 
-            self.assertEqual(3, version)
+            self.assertEqual(4, version)
             self.assertIn("embedded_artwork_path", columns)
             self.assertIn("embedded_artwork_checked", columns)
+            self.assertIn("waveform_peaks", columns)
+            self.assertIn("waveform_analyzed_at", columns)
+
+    def test_schema_v3_is_migrated_to_waveform_columns(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "library.sqlite3"
+            with closing(sqlite3.connect(path)) as conn:
+                conn.execute("CREATE TABLE tracks (id INTEGER PRIMARY KEY)")
+                conn.execute("PRAGMA user_version=3")
+                conn.commit()
+
+            database = LibraryDatabase(path)
+            database.initialize()
+
+            with database.connection() as conn:
+                version = conn.execute("PRAGMA user_version").fetchone()[0]
+                columns = {
+                    row["name"]
+                    for row in conn.execute("PRAGMA table_info(tracks)").fetchall()
+                }
+
+            self.assertEqual(4, version)
+            self.assertIn("waveform_peaks", columns)
+            self.assertIn("waveform_analyzed_at", columns)
 
 
 if __name__ == "__main__":

@@ -23,10 +23,11 @@ class ArtworkUITests(unittest.TestCase):
     def test_embedded_artwork_has_online_and_icon_fallbacks(self) -> None:
         source = APP_SOURCE.read_text(encoding="utf-8")
 
-        self.assertIn("return image(str(embedded), remote)", source)
+        self.assertIn("image(str(embedded), remote)", source)
         self.assertIn("fit=ft.BoxFit.COVER", source)
         self.assertIn("error_content=error_content", source)
         self.assertIn("ft.Icons.MUSIC_NOTE", source)
+        self.assertIn("return ft.GestureDetector(", source)
 
 
 if __name__ == "__main__":

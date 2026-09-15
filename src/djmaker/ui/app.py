@@ -8,6 +8,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import flet as ft
+import flet_audio as fta
 
 from djmaker.config import DEFAULT_ORGANIZE_TEMPLATE, DEFAULT_TARGET_LUFS, AppPaths
 from djmaker.domain.models import AudioMetadata, MetadataCandidate, TrackRecord
@@ -56,6 +57,13 @@ class _BatchTaskContext:
     labels: dict[int, str] = field(default_factory=dict)
 
 
+@dataclass(slots=True)
+class _WaveformTaskContext:
+    force: bool
+    pending_ids: set[int] | None = None
+    labels: dict[int, str] = field(default_factory=dict)
+
+
 class DJMakerUI:
     """Связывает Flet-контролы с сервисным слоем приложения."""
 
@@ -82,6 +90,15 @@ class DJMakerUI:
         self._audio_task_contexts: dict[str, _AudioTaskContext] = {}
         self._scan_task_paths: dict[str, Path] = {}
         self._artwork_task_contexts: dict[str, _BatchTaskContext] = {}
+        self._waveform_task_contexts: dict[str, _WaveformTaskContext] = {}
+        self._waveform_bar_controls: dict[int, list[ft.Container]] = {}
+        self.audio: fta.Audio | None = None
+        self._player_track_id: int | None = None
+        self._player_track_path: Path | None = None
+        self._player_state = fta.AudioState.STOPPED
+        self._player_position_ms = 0
+        self._player_duration_ms = 0
+        self._player_pending_position_ms: int | None = None
 
         self.search = ft.TextField(
             hint_text="Поиск в медиатеке",
@@ -121,6 +138,34 @@ class DJMakerUI:
             tooltip="Текущие задачи",
             on_click=lambda _: self.show_tasks(),
         )
+        self.player_title = ft.Text(
+            "",
+            size=COMPACT_UI.font_sm,
+            weight=ft.FontWeight.BOLD,
+        )
+        self.player_position = ft.Text(
+            "00:00 / 00:00",
+            size=COMPACT_UI.font_micro,
+            color=ft.Colors.ON_SURFACE_VARIANT,
+        )
+        self.player_progress = ft.ProgressBar(width=190, value=0.0)
+        self.player_play_button = ft.IconButton(
+            icon=ft.Icons.PLAY_ARROW,
+            icon_size=COMPACT_UI.action_icon_size,
+            padding=COMPACT_UI.space_xs,
+            visual_density=ft.VisualDensity.COMPACT,
+            tooltip="Воспроизвести / пауза",
+            on_click=self._toggle_player,
+        )
+        self.player_stop_button = ft.IconButton(
+            icon=ft.Icons.STOP_CIRCLE_OUTLINED,
+            icon_size=COMPACT_UI.action_icon_size,
+            padding=COMPACT_UI.space_xs,
+            visual_density=ft.VisualDensity.COMPACT,
+            tooltip="Остановить",
+            on_click=self._stop_player,
+        )
+        self.player_bar = self._build_player_bar()
         self.content = ft.Column(expand=True, spacing=COMPACT_UI.space_md)
         self.theme_button = ft.IconButton(
             icon=theme_mode_icon(self.settings.theme_mode),
@@ -148,6 +193,7 @@ class DJMakerUI:
                     expand=True,
                     padding=COMPACT_UI.content_padding,
                 ),
+                self.player_bar,
                 ft.Divider(height=1, color=ft.Colors.OUTLINE_VARIANT),
                 ft.Container(
                     bgcolor=ft.Colors.SURFACE_CONTAINER_LOW,
@@ -185,6 +231,213 @@ class DJMakerUI:
             )
         )
         self.show_library()
+
+    def _build_player_bar(self) -> ft.Container:
+        """Создаёт компактный постоянный плеер прослушивания."""
+        return ft.Container(
+            visible=False,
+            bgcolor=ft.Colors.SURFACE_CONTAINER,
+            padding=ft.Padding.symmetric(
+                horizontal=COMPACT_UI.status_horizontal_padding,
+                vertical=COMPACT_UI.space_sm,
+            ),
+            content=ft.Row(
+                controls=[
+                    self.player_play_button,
+                    self.player_stop_button,
+                    ft.Icon(
+                        ft.Icons.HEADPHONES,
+                        size=COMPACT_UI.action_icon_size,
+                        color=ft.Colors.PRIMARY,
+                    ),
+                    ft.Column(
+                        controls=[self.player_title, self.player_position],
+                        spacing=0,
+                        width=270,
+                    ),
+                    self.player_progress,
+                    ft.Container(expand=True),
+                    ft.Text(
+                        "Клик по waveform — переход к позиции",
+                        size=COMPACT_UI.font_micro,
+                        color=ft.Colors.ON_SURFACE_VARIANT,
+                    ),
+                ],
+                spacing=COMPACT_UI.space_sm,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+        )
+
+    def _ensure_audio_service(self, track: TrackRecord) -> tuple[fta.Audio, bool]:
+        """Лениво создаёт Audio service и сообщает о смене source."""
+        source = track.path.expanduser().resolve()
+        source_changed = self.audio is None or self._player_track_path != source
+        if self.audio is None:
+            self.audio = fta.Audio(
+                src=str(source),
+                autoplay=False,
+                release_mode=fta.ReleaseMode.STOP,
+                on_loaded=self._on_player_loaded,
+                on_duration_change=self._on_player_duration_change,
+                on_position_change=self._on_player_position_change,
+                on_state_change=self._on_player_state_change,
+            )
+            self.page.services.append(self.audio)
+            self._player_track_path = source
+        elif source_changed:
+            self.audio.src = str(source)
+            self._player_track_path = source
+        return self.audio, source_changed
+
+    async def _on_player_loaded(self, _: object) -> None:
+        """Запускает новый source только после его загрузки native-плеером."""
+        if self.audio is None or self._player_pending_position_ms is None:
+            return
+        position_ms = self._player_pending_position_ms
+        self._player_pending_position_ms = None
+        try:
+            await self.audio.play(position=ft.Duration(milliseconds=position_ms))
+        except Exception as exc:
+            LOGGER.exception("Не удалось запустить загруженный audio source")
+            self._notify(f"Ошибка плеера: {exc}")
+
+    async def _play_track(self, track_id: int, position_ms: int = 0) -> None:
+        """Выбирает трек и запускает воспроизведение с нужной позиции."""
+        try:
+            track = await self.workers.run(self.service.track, track_id)
+            if not track.path.is_file():
+                raise RuntimeError(f"Файл не найден: {track.path}")
+            audio, source_changed = self._ensure_audio_service(track)
+            previous_track_id = self._player_track_id
+            self._player_track_id = track.id
+            if previous_track_id is not None and previous_track_id != track.id:
+                self._paint_waveform_progress(previous_track_id, 0.0)
+            self._player_position_ms = max(0, position_ms)
+            self._player_pending_position_ms = (
+                self._player_position_ms if source_changed else None
+            )
+            if source_changed:
+                self._player_state = fta.AudioState.STOPPED
+            self._player_duration_ms = max(
+                0, int((track.technical.duration or 0.0) * 1000)
+            )
+            artist = track.metadata.artist or "Unknown Artist"
+            title = track.metadata.title or track.path.stem
+            self.player_title.value = f"{artist} - {title}"
+            self.player_bar.visible = True
+            self._refresh_player_controls()
+            self._refresh_waveform_progress()
+            if source_changed:
+                self.page.update()
+            else:
+                await audio.play(
+                    position=ft.Duration(milliseconds=self._player_position_ms)
+                )
+        except Exception as exc:
+            LOGGER.exception("Не удалось воспроизвести трек %s", track_id)
+            self._notify(f"Не удалось воспроизвести файл: {exc}")
+
+    async def _toggle_player(self, _: object) -> None:
+        if self.audio is None:
+            return
+        try:
+            if self._player_state is fta.AudioState.PLAYING:
+                await self.audio.pause()
+            elif self._player_state is fta.AudioState.COMPLETED:
+                await self.audio.play()
+            else:
+                await self.audio.resume()
+        except Exception as exc:
+            LOGGER.exception("Ошибка управления плеером")
+            self._notify(f"Ошибка плеера: {exc}")
+
+    async def _stop_player(self, _: object) -> None:
+        if self.audio is None:
+            return
+        try:
+            await self.audio.pause()
+            await self.audio.seek(ft.Duration(milliseconds=0))
+            self._player_position_ms = 0
+            self._player_state = fta.AudioState.STOPPED
+            self._refresh_player_controls()
+            self._refresh_waveform_progress()
+            self.page.update()
+        except Exception as exc:
+            LOGGER.exception("Ошибка остановки плеера")
+            self._notify(f"Ошибка плеера: {exc}")
+
+    def _on_player_duration_change(self, event: fta.AudioDurationChangeEvent) -> None:
+        self._player_duration_ms = max(0, event.duration.in_milliseconds)
+        self._refresh_player_controls()
+        self._refresh_waveform_progress()
+        self.page.update()
+
+    def _on_player_position_change(self, event: fta.AudioPositionChangeEvent) -> None:
+        self._player_position_ms = max(0, int(event.position))
+        self._refresh_player_controls()
+        self._refresh_waveform_progress()
+        self.page.update()
+
+    def _on_player_state_change(self, event: fta.AudioStateChangeEvent) -> None:
+        self._player_state = event.state
+        if event.state is fta.AudioState.COMPLETED:
+            self._player_position_ms = self._player_duration_ms
+        self._refresh_player_controls()
+        self._refresh_waveform_progress()
+        self.page.update()
+
+    def _refresh_player_controls(self) -> None:
+        duration = self._player_duration_ms
+        position = min(self._player_position_ms, duration) if duration else self._player_position_ms
+        self.player_play_button.icon = (
+            ft.Icons.PAUSE if self._player_state is fta.AudioState.PLAYING else ft.Icons.PLAY_ARROW
+        )
+        self.player_position.value = (
+            f"{self._format_duration(position / 1000)} / "
+            f"{self._format_duration(duration / 1000)}"
+        )
+        self.player_progress.value = (position / duration) if duration > 0 else 0.0
+
+    @staticmethod
+    def _waveform_width() -> int:
+        return (
+            COMPACT_UI.waveform_bar_count * COMPACT_UI.waveform_bar_width
+            + (COMPACT_UI.waveform_bar_count - 1) * COMPACT_UI.waveform_bar_gap
+        )
+
+    def _play_from_waveform(self, event: ft.TapEvent, track: TrackRecord) -> None:
+        if event.local_position is None:
+            return
+        duration = track.technical.duration or 0.0
+        if duration <= 0:
+            self._notify("Для seek недоступна продолжительность трека")
+            return
+        fraction = min(
+            1.0,
+            max(0.0, event.local_position.x / self._waveform_width()),
+        )
+        position_ms = int(duration * fraction * 1000)
+        self.page.run_task(self._play_track, track.id, position_ms)
+
+    def _refresh_waveform_progress(self) -> None:
+        track_id = self._player_track_id
+        if track_id is None:
+            return
+        duration = self._player_duration_ms
+        fraction = (self._player_position_ms / duration) if duration > 0 else 0.0
+        self._paint_waveform_progress(track_id, fraction)
+
+    def _paint_waveform_progress(self, track_id: int, fraction: float) -> None:
+        bars = self._waveform_bar_controls.get(track_id)
+        if not bars:
+            return
+        played = min(len(bars), max(0, round(len(bars) * fraction)))
+        for index, bar in enumerate(bars):
+            bar.bgcolor = (
+                ft.Colors.PRIMARY
+                if index < played
+                else ft.Colors.SURFACE_CONTAINER_HIGHEST
+            )
 
     def _build_navigation(self) -> ft.NavigationRail:
         """Создаёт постоянную боковую навигацию приложения."""
@@ -383,7 +636,7 @@ class DJMakerUI:
                 self._empty_state(
                     ft.Icons.TASK_ALT,
                     "Фоновых задач пока нет",
-                    "Сканирование, индексирование обложек и BPM / Key появятся здесь.",
+                    "Сканирование, обложки, waveform и BPM / Key появятся здесь.",
                 )
             )
         else:
@@ -542,6 +795,11 @@ class DJMakerUI:
             self.page.run_task(self._run_scan, self._scan_task_paths[task_id], task_id)
         elif snapshot.kind is TaskKind.ARTWORK_INDEX and task_id in self._artwork_task_contexts:
             self.page.run_task(self._run_embedded_artwork, task_id)
+        elif (
+            snapshot.kind is TaskKind.WAVEFORM_ANALYSIS
+            and task_id in self._waveform_task_contexts
+        ):
+            self.page.run_task(self._run_waveform_analysis, task_id)
         else:
             task.mark_failed("Контекст задачи больше недоступен")
 
@@ -552,6 +810,7 @@ class DJMakerUI:
         self._audio_task_contexts.pop(task_id, None)
         self._scan_task_paths.pop(task_id, None)
         self._artwork_task_contexts.pop(task_id, None)
+        self._waveform_task_contexts.pop(task_id, None)
 
     def _replace_content(
         self,
@@ -633,6 +892,7 @@ class DJMakerUI:
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
             spacing=COMPACT_UI.space_sm,
         )
+        self._waveform_bar_controls.clear()
         items: list[ft.Control] = []
         if not tracks:
             items.append(
@@ -658,50 +918,43 @@ class DJMakerUI:
         )
 
     def _track_row(self, track: TrackRecord) -> ft.Control:
-        duration = self._format_duration(track.technical.duration)
-        bitrate = f"{round(track.technical.bitrate / 1000)} kbps" if track.technical.bitrate else "—"
-        title = track.metadata.title or track.path.stem
-        artist = track.metadata.artist or "Unknown Artist"
-        album = track.metadata.album or "Unknown Album"
+        first_line = self._track_primary_line(track)
+        second_line = self._track_technical_line(track)
+        metadata_block = ft.Column(
+            controls=[
+                ft.Text(
+                    first_line,
+                    weight=ft.FontWeight.BOLD,
+                    size=COMPACT_UI.font_sm,
+                    max_lines=1,
+                    overflow=ft.TextOverflow.ELLIPSIS,
+                ),
+                ft.Text(
+                    second_line,
+                    size=COMPACT_UI.font_xs,
+                    color=ft.Colors.ON_SURFACE_VARIANT,
+                    max_lines=1,
+                    overflow=ft.TextOverflow.ELLIPSIS,
+                ),
+                ft.Text(
+                    str(track.path),
+                    size=COMPACT_UI.font_micro,
+                    color=ft.Colors.ON_SURFACE_VARIANT,
+                    max_lines=1,
+                    overflow=ft.TextOverflow.ELLIPSIS,
+                ),
+            ],
+            expand=True,
+            height=COMPACT_UI.track_icon_box,
+            spacing=0,
+            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+        )
         return self._surface_card(
             ft.Row(
                 controls=[
                     self._track_artwork(track),
-                    ft.Column(
-                        controls=[
-                            ft.Text(
-                                title,
-                                weight=ft.FontWeight.BOLD,
-                                size=COMPACT_UI.font_md,
-                            ),
-                            ft.Text(
-                                f"{artist} · {album}",
-                                size=COMPACT_UI.font_xs,
-                                color=ft.Colors.ON_SURFACE_VARIANT,
-                            ),
-                            ft.Text(
-                                str(track.path),
-                                size=COMPACT_UI.font_micro,
-                                color=ft.Colors.ON_SURFACE_VARIANT,
-                            ),
-                        ],
-                        expand=True,
-                        spacing=2,
-                    ),
-                    ft.Text(
-                        self._analysis_label(track),
-                        size=COMPACT_UI.font_xs,
-                        color=(
-                            ft.Colors.PRIMARY
-                            if track.analysis is not None
-                            else ft.Colors.ON_SURFACE_VARIANT
-                        ),
-                    ),
-                    ft.Text(
-                        f"{duration}  ·  {bitrate}",
-                        size=COMPACT_UI.font_xs,
-                        color=ft.Colors.ON_SURFACE_VARIANT,
-                    ),
+                    metadata_block,
+                    self._track_waveform(track),
                     ft.IconButton(
                         icon=ft.Icons.EDIT_OUTLINED,
                         icon_size=COMPACT_UI.action_icon_size,
@@ -732,9 +985,8 @@ class DJMakerUI:
             )
         )
 
-    @staticmethod
-    def _track_artwork(track: TrackRecord) -> ft.Control:
-        """Показывает встроенную обложку, затем online cover и fallback."""
+    def _track_artwork(self, track: TrackRecord) -> ft.Control:
+        """Показывает кликабельную обложку с embedded/online fallback."""
         fallback = ft.Container(
             width=COMPACT_UI.track_icon_box,
             height=COMPACT_UI.track_icon_box,
@@ -756,18 +1008,117 @@ class DJMakerUI:
                 fit=ft.BoxFit.COVER,
                 border_radius=6,
                 error_content=error_content,
-                cache_width=96,
-                cache_height=96,
+                cache_width=128,
+                cache_height=128,
                 semantics_label="Обложка альбома",
             )
 
         artwork_url = (track.artwork_url or "").strip()
         remote = image(artwork_url, fallback) if artwork_url else fallback
-
         embedded = track.embedded_artwork_path
-        if embedded is not None and embedded.is_file():
-            return image(str(embedded), remote)
-        return remote
+        artwork: ft.Control = (
+            image(str(embedded), remote)
+            if embedded is not None and embedded.is_file()
+            else remote
+        )
+        return ft.GestureDetector(
+            content=artwork,
+            on_tap=lambda _, track_id=track.id: self.page.run_task(
+                self._play_track, track_id, 0
+            ),
+            mouse_cursor=ft.MouseCursor.CLICK,
+        )
+
+    def _track_waveform(self, track: TrackRecord) -> ft.Control:
+        peaks = track.waveform.peaks if track.waveform is not None else ()
+        values = list(peaks[: COMPACT_UI.waveform_bar_count])
+        if len(values) < COMPACT_UI.waveform_bar_count:
+            values.extend([0.0] * (COMPACT_UI.waveform_bar_count - len(values)))
+
+        bars: list[ft.Container] = []
+        for peak in values:
+            normalized = min(1.0, max(0.0, float(peak)))
+            height = max(
+                COMPACT_UI.waveform_min_bar_height,
+                round(COMPACT_UI.waveform_height * normalized),
+            )
+            bars.append(
+                ft.Container(
+                    width=COMPACT_UI.waveform_bar_width,
+                    height=height,
+                    border_radius=1,
+                    bgcolor=ft.Colors.SURFACE_CONTAINER_HIGHEST,
+                )
+            )
+
+        self._waveform_bar_controls[track.id] = bars
+        if self._player_track_id == track.id:
+            duration = self._player_duration_ms
+            fraction = (self._player_position_ms / duration) if duration > 0 else 0.0
+            self._paint_waveform_progress(track.id, fraction)
+
+        waveform = ft.Container(
+            width=self._waveform_width(),
+            height=COMPACT_UI.track_icon_box,
+            alignment=ft.Alignment.CENTER,
+            content=ft.Row(
+                controls=bars,
+                spacing=COMPACT_UI.waveform_bar_gap,
+                vertical_alignment=ft.CrossAxisAlignment.END,
+            ),
+        )
+        return ft.GestureDetector(
+            content=waveform,
+            on_tap_down=lambda event, current=track: self._play_from_waveform(
+                event, current
+            ),
+            mouse_cursor=ft.MouseCursor.CLICK,
+        )
+
+    def _track_primary_line(self, track: TrackRecord) -> str:
+        artist = track.metadata.artist or "Unknown Artist"
+        title = track.metadata.title or track.path.stem
+        album = track.metadata.album or "Unknown Album"
+        return f"{artist} - {title} | {album} | {self._compact_analysis_label(track)}"
+
+    def _track_technical_line(self, track: TrackRecord) -> str:
+        technical = track.technical
+        file_format = (track.extension.lstrip(".") or "audio").upper()
+        duration = self._format_duration(technical.duration)
+        quality: list[str] = []
+        if technical.bitrate:
+            quality.append(f"{round(technical.bitrate / 1000)} kbps")
+        if technical.sample_rate:
+            quality.append(f"{technical.sample_rate / 1000:g} kHz")
+        if technical.channels:
+            channel_label = (
+                "Mono"
+                if technical.channels == 1
+                else "Stereo"
+                if technical.channels == 2
+                else f"{technical.channels} ch"
+            )
+            quality.append(channel_label)
+        genre = track.metadata.genre.strip() or "Жанр —"
+        quality_label = " · ".join(quality) or "Качество —"
+        return f"{file_format} | {duration} | {quality_label} | {genre}"
+
+    @staticmethod
+    def _compact_analysis_label(track: TrackRecord) -> str:
+        analysis = track.analysis
+        if analysis is None:
+            return "(BPM/KEY —)"
+        parts: list[str] = []
+        if analysis.bpm is not None:
+            parts.append(f"{analysis.bpm:.1f} BPM")
+        key = " ".join(
+            part for part in (analysis.musical_key, analysis.scale) if part
+        )
+        if key:
+            parts.append(key)
+        if analysis.camelot:
+            parts.append(analysis.camelot)
+        return f"({' / '.join(parts) if parts else 'BPM/KEY —'})"
 
     def show_folders(self) -> None:
         """Отображает корневые папки и действия сканирования."""
@@ -912,6 +1263,8 @@ class DJMakerUI:
             )
             if self.navigation.selected_index == 1:
                 self.show_folders()
+            if self.tasks.active_for_kind(TaskKind.WAVEFORM_ANALYSIS) is None:
+                self.page.run_task(self.ensure_waveforms)
         finally:
             self._refresh_task_indicator()
             self.page.update()
@@ -1014,11 +1367,13 @@ class DJMakerUI:
         self._set_navigation_index(4)
         try:
             total, analyzed = self.service.analysis_counts()
+            waveform_total, waveform_analyzed = self.service.waveform_counts()
         except RuntimeError as exc:
             self._notify(str(exc))
             return
 
         pending = max(0, total - analyzed)
+        waveform_pending = max(0, waveform_total - waveform_analyzed)
         analysis_card = self._surface_card(
             ft.Column(
                 controls=[
@@ -1076,6 +1431,58 @@ class DJMakerUI:
             )
         )
 
+        waveform_card = self._surface_card(
+            ft.Column(
+                controls=[
+                    ft.Row(
+                        controls=[
+                            ft.Icon(
+                                ft.Icons.GRAPHIC_EQ,
+                                size=18,
+                                color=ft.Colors.PRIMARY,
+                            ),
+                            ft.Column(
+                                controls=[
+                                    ft.Text("Waveform", weight=ft.FontWeight.BOLD),
+                                    ft.Text(
+                                        "FFmpeg → mono PCM → 60 нормализованных вертикальных полос",
+                                        size=COMPACT_UI.font_xs,
+                                        color=ft.Colors.ON_SURFACE_VARIANT,
+                                    ),
+                                ],
+                                expand=True,
+                                spacing=2,
+                            ),
+                            ft.Text(
+                                f"Готово: {waveform_analyzed}/{waveform_total} · "
+                                f"в очереди: {waveform_pending}",
+                                size=COMPACT_UI.font_xs,
+                            ),
+                        ]
+                    ),
+                    ft.Row(
+                        controls=[
+                            ft.Button(
+                                content="Построить новые",
+                                icon=ft.Icons.GRAPHIC_EQ,
+                                on_click=self._start_waveform_analysis,
+                            ),
+                            ft.Button(
+                                content="Перестроить всё",
+                                icon=ft.Icons.REFRESH,
+                                on_click=lambda event: self._start_waveform_analysis(
+                                    event,
+                                    force=True,
+                                ),
+                            ),
+                        ],
+                        spacing=COMPACT_UI.space_sm,
+                    ),
+                ],
+                spacing=COMPACT_UI.space_sm,
+            )
+        )
+
         planned = (
             (
                 ft.Icons.VOLUME_UP_OUTLINED,
@@ -1088,7 +1495,7 @@ class DJMakerUI:
                 "Второй уровень поиска музыкальных дубликатов",
             ),
         )
-        controls: list[ft.Control] = [analysis_card]
+        controls: list[ft.Control] = [analysis_card, waveform_card]
         controls.extend(
             self._surface_card(
                 ft.Row(
@@ -1269,6 +1676,154 @@ class DJMakerUI:
             self.analysis_progress_text.visible = running
             self._refresh_task_indicator()
             self.page.update()
+
+    def _start_waveform_analysis(self, _: object, *, force: bool = False) -> None:
+        existing = self.tasks.active_for_kind(TaskKind.WAVEFORM_ANALYSIS)
+        if existing is not None:
+            self._notify(
+                "Waveform уже строится или остановлен. "
+                "Откройте «Задачи» для управления."
+            )
+            return
+
+        task = self.tasks.create(
+            kind=TaskKind.WAVEFORM_ANALYSIS,
+            title="Анализ Waveform",
+            detail="Подготовка FFmpeg...",
+        )
+        self._waveform_task_contexts[task.id] = _WaveformTaskContext(force=force)
+        self._refresh_task_indicator()
+        self.page.run_task(self._run_waveform_analysis, task.id)
+
+    async def ensure_waveforms(self) -> None:
+        """Автоматически строит отсутствующие waveform после запуска приложения."""
+        existing = self.tasks.active_for_kind(TaskKind.WAVEFORM_ANALYSIS)
+        if existing is not None:
+            return
+        try:
+            tracks = await self.workers.run(
+                self.service.tracks_for_waveform_analysis,
+                force=False,
+            )
+        except Exception:
+            LOGGER.exception("Не удалось получить очередь waveform")
+            return
+        if not tracks:
+            return
+
+        task = self.tasks.create(
+            kind=TaskKind.WAVEFORM_ANALYSIS,
+            title="Анализ Waveform",
+            detail="Подготовка FFmpeg...",
+            total=len(tracks),
+        )
+        self._waveform_task_contexts[task.id] = _WaveformTaskContext(
+            force=False,
+            pending_ids={track.id for track in tracks},
+            labels={track.id: str(track.path) for track in tracks},
+        )
+        self._refresh_task_indicator()
+        await self._run_waveform_analysis(task.id)
+
+    async def _run_waveform_analysis(self, task_id: str) -> None:
+        task = self.tasks.get(task_id)
+        context = self._waveform_task_contexts.get(task_id)
+        if task is None or context is None:
+            return
+
+        changed = False
+        try:
+            task.checkpoint()
+            report = await self.workers.run(self.runtime.ensure_all)
+            self.runtime_report = report
+            task.checkpoint()
+            if not report.ffmpeg.available:
+                raise RuntimeError(f"FFmpeg недоступен: {report.ffmpeg.detail}")
+
+            if context.pending_ids is None:
+                tracks = await self.workers.run(
+                    self.service.tracks_for_waveform_analysis,
+                    force=context.force,
+                )
+                context.pending_ids = {track.id for track in tracks}
+                context.labels = {track.id: str(track.path) for track in tracks}
+                task.set_progress(
+                    total=len(tracks),
+                    detail="Очередь waveform подготовлена",
+                )
+
+            pending_ids = context.pending_ids
+            if not pending_ids:
+                task.mark_completed("Все waveform уже построены")
+                self._forget_task_context(task_id)
+                return
+
+            concurrency = min(2, self.workers.max_workers, len(pending_ids))
+            task.set_progress(detail=f"Waveform · потоков: {concurrency}")
+
+            def analyze_one(track_id: int) -> TrackRecord:
+                task.checkpoint()
+                return self.service.analyze_waveform(track_id, task=task)
+
+            async for outcome in self.workers.run_many_unordered(
+                analyze_one,
+                list(pending_ids),
+                max_concurrency=concurrency,
+            ):
+                if isinstance(outcome.error, (TaskPaused, TaskCancelled)):
+                    continue
+
+                label = context.labels.get(outcome.item, f"track_id={outcome.item}")
+                pending_ids.discard(outcome.item)
+                if outcome.error is not None:
+                    LOGGER.warning(
+                        "Не удалось построить waveform %s: %s",
+                        label,
+                        outcome.error,
+                    )
+                    task.advance(success=False, detail=label)
+                else:
+                    changed = True
+                    task.advance(success=True, detail=label)
+
+            if task.cancel_requested:
+                task.mark_cancelled()
+                self._forget_task_context(task_id)
+                self._notify("Анализ waveform отменён")
+            elif task.pause_requested:
+                task.mark_paused("Остановлено · можно продолжить")
+                self._notify("Анализ waveform остановлен")
+            else:
+                snapshot = task.snapshot()
+                task.mark_completed(
+                    f"Готово: {snapshot.succeeded} waveform, "
+                    f"{snapshot.failed} ошибок"
+                )
+                self._forget_task_context(task_id)
+                self._notify(
+                    "Waveform-анализ завершён: "
+                    f"{snapshot.succeeded} успешно, {snapshot.failed} ошибок"
+                )
+        except TaskPaused:
+            task.mark_paused("Остановлено · можно продолжить")
+            self._notify("Анализ waveform остановлен")
+        except TaskCancelled:
+            task.mark_cancelled()
+            self._forget_task_context(task_id)
+            self._notify("Анализ waveform отменён")
+        except Exception as exc:
+            LOGGER.exception("Ошибка пакетного waveform-анализа")
+            task.mark_failed(exc)
+            self._forget_task_context(task_id)
+            self._notify(f"Не удалось выполнить waveform-анализ: {exc}")
+        finally:
+            self._refresh_task_indicator()
+            if changed and self.navigation.selected_index == 0:
+                self.show_library()
+            elif self.navigation.selected_index == 4:
+                self.show_audio_modules()
+            else:
+                self.page.update()
 
     @staticmethod
     def _analysis_label(track: TrackRecord) -> str:

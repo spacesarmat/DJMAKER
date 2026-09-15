@@ -28,6 +28,7 @@ class TaskUITests(unittest.TestCase):
         self.assertIn("TaskKind.AUDIO_ANALYSIS", source)
         self.assertIn("TaskKind.LIBRARY_SCAN", source)
         self.assertIn("TaskKind.ARTWORK_INDEX", source)
+        self.assertIn("TaskKind.WAVEFORM_ANALYSIS", source)
         self.assertIn("task=task", source)
 
     def test_task_monitor_is_started_with_application(self) -> None:

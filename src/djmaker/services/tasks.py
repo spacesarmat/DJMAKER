@@ -28,6 +28,7 @@ class TaskKind(StrEnum):
     AUDIO_ANALYSIS = "audio_analysis"
     LIBRARY_SCAN = "library_scan"
     ARTWORK_INDEX = "artwork_index"
+    WAVEFORM_ANALYSIS = "waveform_analysis"
 
 
 ACTIVE_TASK_STATUSES = frozenset(

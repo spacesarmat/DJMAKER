@@ -45,6 +45,14 @@ class AudioAnalysis:
     analyzed_at: str = ""
 
 
+@dataclass(slots=True)
+class WaveformAnalysis:
+    """Компактная форма волны трека для UI и seek."""
+
+    peaks: tuple[float, ...] = ()
+    analyzed_at: str = ""
+
+
 @dataclass(frozen=True, slots=True)
 class EmbeddedArtwork:
     """Встроенная обложка, извлечённая из аудиоконтейнера."""
@@ -80,6 +88,7 @@ class TrackRecord:
     embedded_artwork_path: Path | None = None
     embedded_artwork_checked: bool = False
     analysis: AudioAnalysis | None = None
+    waveform: WaveformAnalysis | None = None
 
 
 @dataclass(slots=True)

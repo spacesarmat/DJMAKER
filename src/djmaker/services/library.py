@@ -20,6 +20,7 @@ from djmaker.services.audio_tags import AudioTagService
 from djmaker.services.organizer import FileOrganizer
 from djmaker.services.scanner import LibraryScanner
 from djmaker.services.tasks import TaskControl
+from djmaker.services.waveform import WaveformAnalyzer
 
 
 class LibraryServiceError(RuntimeError):
@@ -38,6 +39,7 @@ class LibraryService:
         plugins: PluginRegistry,
         analyzer: EssentiaAudioAnalyzer,
         artwork_cache: ArtworkCache,
+        waveform_analyzer: WaveformAnalyzer,
     ) -> None:
         self.database = database
         self.scanner = scanner
@@ -46,6 +48,7 @@ class LibraryService:
         self.plugins = plugins
         self.analyzer = analyzer
         self.artwork_cache = artwork_cache
+        self.waveform_analyzer = waveform_analyzer
 
     def scan_folder(
         self,
@@ -60,6 +63,10 @@ class LibraryService:
     def tracks(self, search: str = "", limit: int = 1000) -> list[TrackRecord]:
         """Возвращает треки медиатеки."""
         return self.database.list_tracks(search=search, limit=limit)
+
+    def track(self, track_id: int) -> TrackRecord:
+        """Возвращает один трек или поднимает понятную ошибку."""
+        return self._require_track(track_id)
 
     def roots(self) -> list[Path]:
         """Возвращает корневые музыкальные папки."""
@@ -76,6 +83,29 @@ class LibraryService:
     def tracks_for_analysis(self, *, force: bool = False) -> list[TrackRecord]:
         """Возвращает очередь треков для BPM/Key анализа."""
         return self.database.list_tracks_for_analysis(force=force)
+
+    def waveform_counts(self) -> tuple[int, int]:
+        """Возвращает (всего треков, waveform построено)."""
+        return self.database.waveform_counts()
+
+    def tracks_for_waveform_analysis(
+        self, *, force: bool = False
+    ) -> list[TrackRecord]:
+        """Возвращает очередь треков для построения waveform."""
+        return self.database.list_tracks_for_waveform_analysis(force=force)
+
+    def analyze_waveform(
+        self,
+        track_id: int,
+        task: TaskControl | None = None,
+    ) -> TrackRecord:
+        """Строит waveform одного трека и сохраняет её в SQLite."""
+        if task is not None:
+            task.checkpoint()
+        track = self._require_track(track_id)
+        waveform = self.waveform_analyzer.analyze(track.path, task=task)
+        self.database.save_waveform_analysis(track_id, waveform)
+        return self._require_track(track_id)
 
     def tracks_for_artwork_refresh(self) -> list[TrackRecord]:
         """Возвращает треки, для которых ещё не проверена встроенная обложка."""

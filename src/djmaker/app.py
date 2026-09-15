@@ -17,6 +17,7 @@ from djmaker.services.organizer import FileOrganizer
 from djmaker.services.scanner import LibraryScanner
 from djmaker.services.tasks import TaskManager
 from djmaker.services.workers import BackgroundWorkers
+from djmaker.services.waveform import WaveformAnalyzer
 from djmaker.settings import SettingsStore
 from djmaker.ui.app import DJMakerUI
 
@@ -35,6 +36,7 @@ async def flet_main(page: ft.Page) -> None:
     plugins = PluginRegistry()
     runtime = RuntimeDependencies(paths.data_dir)
     analyzer = EssentiaAudioAnalyzer(runtime)
+    waveform_analyzer = WaveformAnalyzer(runtime)
     service = LibraryService(
         database,
         scanner,
@@ -43,6 +45,7 @@ async def flet_main(page: ft.Page) -> None:
         plugins,
         analyzer,
         artwork_cache,
+        waveform_analyzer,
     )
     workers = BackgroundWorkers(max_workers=4)
     tasks = TaskManager()
@@ -63,6 +66,7 @@ async def flet_main(page: ft.Page) -> None:
     page.run_task(ui.monitor_tasks)
     page.run_task(ui.ensure_runtime_dependencies)
     page.run_task(ui.ensure_embedded_artwork)
+    page.run_task(ui.ensure_waveforms)
 
     def on_disconnect(_: object) -> None:
         workers.close()

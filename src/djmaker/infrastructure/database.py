@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -14,10 +15,11 @@ from djmaker.domain.models import (
     AudioTechnicalInfo,
     DuplicateGroup,
     TrackRecord,
+    WaveformAnalysis,
 )
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 class DatabaseError(RuntimeError):
@@ -51,6 +53,9 @@ class LibraryDatabase:
                     if version == 2:
                         self._migrate_v2_to_v3(conn)
                         version = 3
+                    if version == 3:
+                        self._migrate_v3_to_v4(conn)
+                        version = 4
                     conn.execute(f"PRAGMA user_version={version}")
                     conn.commit()
         except sqlite3.Error as exc:
@@ -112,6 +117,8 @@ class LibraryDatabase:
                 artwork_url TEXT,
                 embedded_artwork_path TEXT,
                 embedded_artwork_checked INTEGER NOT NULL DEFAULT 0,
+                waveform_peaks TEXT,
+                waveform_analyzed_at TEXT,
                 scan_token TEXT NOT NULL DEFAULT '',
                 added_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
@@ -157,6 +164,16 @@ class LibraryDatabase:
             ALTER TABLE tracks ADD COLUMN embedded_artwork_path TEXT;
             ALTER TABLE tracks ADD COLUMN embedded_artwork_checked
                 INTEGER NOT NULL DEFAULT 0;
+            """
+        )
+
+    @staticmethod
+    def _migrate_v3_to_v4(conn: sqlite3.Connection) -> None:
+        """Добавляет компактную форму волны для UI и seek."""
+        conn.executescript(
+            """
+            ALTER TABLE tracks ADD COLUMN waveform_peaks TEXT;
+            ALTER TABLE tracks ADD COLUMN waveform_analyzed_at TEXT;
             """
         )
 
@@ -332,6 +349,13 @@ class LibraryDatabase:
                             ELSE '' END,
                         analyzed_at=CASE
                             WHEN tracks.file_hash=excluded.file_hash THEN tracks.analyzed_at
+                            ELSE NULL END,
+                        waveform_peaks=CASE
+                            WHEN tracks.file_hash=excluded.file_hash THEN tracks.waveform_peaks
+                            ELSE NULL END,
+                        waveform_analyzed_at=CASE
+                            WHEN tracks.file_hash=excluded.file_hash
+                            THEN tracks.waveform_analyzed_at
                             ELSE NULL END,
                         scan_token=excluded.scan_token,
                         updated_at=excluded.updated_at,
@@ -552,6 +576,60 @@ class LibraryDatabase:
         except sqlite3.Error as exc:
             raise DatabaseError(f"Не удалось сохранить аудио-анализ: {exc}") from exc
 
+    def waveform_counts(self) -> tuple[int, int]:
+        """Возвращает количество всех и уже построенных waveform."""
+        try:
+            with self.connection() as conn:
+                row = conn.execute(
+                    "SELECT COUNT(*) AS total, "
+                    "COUNT(waveform_analyzed_at) AS analyzed FROM tracks"
+                ).fetchone()
+        except sqlite3.Error as exc:
+            raise DatabaseError(
+                f"Не удалось получить статистику waveform: {exc}"
+            ) from exc
+        return int(row["total"]), int(row["analyzed"])
+
+    def list_tracks_for_waveform_analysis(
+        self, *, force: bool = False
+    ) -> list[TrackRecord]:
+        """Возвращает треки без waveform либо всю медиатеку."""
+        where = "" if force else "WHERE waveform_analyzed_at IS NULL"
+        try:
+            with self.connection() as conn:
+                rows = conn.execute(
+                    f"SELECT * FROM tracks {where} ORDER BY id"
+                ).fetchall()
+        except sqlite3.Error as exc:
+            raise DatabaseError(
+                f"Не удалось получить очередь waveform: {exc}"
+            ) from exc
+        return [self._row_to_track(row) for row in rows]
+
+    def save_waveform_analysis(
+        self, track_id: int, waveform: WaveformAnalysis
+    ) -> None:
+        """Сохраняет компактный массив пиков формы волны."""
+        analyzed_at = waveform.analyzed_at or self._now()
+        payload = json.dumps(
+            [round(float(value), 4) for value in waveform.peaks],
+            separators=(",", ":"),
+        )
+        try:
+            with self.connection() as conn:
+                cursor = conn.execute(
+                    "UPDATE tracks SET waveform_peaks=?, waveform_analyzed_at=?, "
+                    "updated_at=? WHERE id=?",
+                    (payload, analyzed_at, self._now(), track_id),
+                )
+                if cursor.rowcount != 1:
+                    raise DatabaseError(f"Трек не найден: {track_id}")
+                conn.commit()
+        except sqlite3.Error as exc:
+            raise DatabaseError(
+                f"Не удалось сохранить waveform: {exc}"
+            ) from exc
+
     def list_tracks_for_artwork_refresh(self) -> list[TrackRecord]:
         """Возвращает старые записи, где встроенная обложка ещё не проверялась."""
         try:
@@ -649,6 +727,17 @@ class LibraryDatabase:
                     analyzed_at=str(row["analyzed_at"] or ""),
                 )
                 if row["analyzed_at"] is not None
+                else None
+            ),
+            waveform=(
+                WaveformAnalysis(
+                    peaks=tuple(
+                        float(value)
+                        for value in json.loads(row["waveform_peaks"] or "[]")
+                    ),
+                    analyzed_at=str(row["waveform_analyzed_at"] or ""),
+                )
+                if row["waveform_analyzed_at"] is not None
                 else None
             ),
         )
