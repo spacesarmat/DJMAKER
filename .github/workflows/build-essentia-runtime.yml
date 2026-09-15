@@ -10,8 +10,8 @@ env:
   ESSENTIA_COMMIT: 66a890f285d0e1988155c12d17a2068e406cdd90
   EIGEN_COMMIT: 3147391d946bb4b6c68edd901f2add6ac1f31f8c
   EIGEN_VERSION: 3.4.0
-  ESSENTIA_RUNTIME_VERSION: 2026.08.27-66a890f2-r4
-  ESSENTIA_RELEASE_TAG: essentia-runtime-v2026.08.27-66a890f2-r4
+  ESSENTIA_RUNTIME_VERSION: 2026.08.27-66a890f2-r5
+  ESSENTIA_RELEASE_TAG: essentia-runtime-v2026.08.27-66a890f2-r5
 
 jobs:
   windows-amd64:
@@ -58,7 +58,7 @@ jobs:
             --fft=KISS \
             --cross-compile-mingw32 \
             --mode=release \
-            --std=c++17
+            --std=c++14
 
       - name: Build Essentia
         working-directory: vendor/essentia
@@ -69,7 +69,7 @@ jobs:
           mkdir -p out/windows-amd64
           x86_64-w64-mingw32-g++ \
             -O2 \
-            -std=c++17 \
+            -std=c++14 \
             -D_USE_MATH_DEFINES \
             -static \
             -static-libgcc \

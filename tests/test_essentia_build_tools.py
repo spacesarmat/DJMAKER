@@ -50,7 +50,7 @@ class EssentiaBuildToolsTests(unittest.TestCase):
             PROJECT_ROOT / ".github" / "workflows" / "build-essentia-runtime.yml"
         ).read_text(encoding="utf-8")
 
-        self.assertIn("ESSENTIA_RUNTIME_VERSION: 2026.08.27-66a890f2-r4", workflow)
+        self.assertIn("ESSENTIA_RUNTIME_VERSION: 2026.08.27-66a890f2-r5", workflow)
         self.assertIn(
             "EIGEN_COMMIT: 3147391d946bb4b6c68edd901f2add6ac1f31f8c",
             workflow,
@@ -65,6 +65,19 @@ class EssentiaBuildToolsTests(unittest.TestCase):
         )
         self.assertIn("-D_USE_MATH_DEFINES", workflow)
         self.assertGreaterEqual(workflow.count("-DEIGEN_MPL2_ONLY"), 2)
+
+    def test_windows_build_uses_cxx14_to_avoid_mingw_std_byte_conflict(self) -> None:
+        workflow = (
+            PROJECT_ROOT / ".github" / "workflows" / "build-essentia-runtime.yml"
+        ).read_text(encoding="utf-8")
+        windows_block = workflow.split("  test-windows-amd64:", 1)[0]
+        macos_block = workflow.split("  macos:", 1)[1].split("  publish:", 1)[0]
+
+        self.assertIn("--std=c++14", windows_block)
+        self.assertIn("-std=c++14", windows_block)
+        self.assertNotIn("c++17", windows_block)
+        self.assertIn("--std=c++17", macos_block)
+        self.assertIn("-std=c++17", macos_block)
 
     def test_workflow_uses_node24_actions(self) -> None:
         workflow = (
