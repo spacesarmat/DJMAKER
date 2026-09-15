@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from djmaker.domain.models import (
+    AudioAnalysis,
     AudioMetadata,
     AudioTechnicalInfo,
     DuplicateGroup,
@@ -16,7 +17,7 @@ from djmaker.domain.models import (
 )
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 class DatabaseError(RuntimeError):
@@ -42,6 +43,10 @@ class LibraryDatabase:
                 if version == 0:
                     self._create_schema(conn)
                     conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+                    conn.commit()
+                elif version == 1:
+                    self._migrate_v1_to_v2(conn)
+                    conn.execute("PRAGMA user_version=2")
                     conn.commit()
         except sqlite3.Error as exc:
             raise DatabaseError(f"Не удалось инициализировать БД: {exc}") from exc
@@ -92,6 +97,13 @@ class LibraryDatabase:
                 disc_number INTEGER,
                 bpm REAL,
                 musical_key TEXT NOT NULL DEFAULT '',
+                analysis_bpm REAL,
+                analysis_bpm_confidence REAL,
+                analysis_key TEXT NOT NULL DEFAULT '',
+                analysis_scale TEXT NOT NULL DEFAULT '',
+                analysis_key_strength REAL,
+                analysis_camelot TEXT NOT NULL DEFAULT '',
+                analyzed_at TEXT,
                 artwork_url TEXT,
                 scan_token TEXT NOT NULL DEFAULT '',
                 added_at TEXT NOT NULL,
@@ -112,6 +124,21 @@ class LibraryDatabase:
             CREATE INDEX IF NOT EXISTS idx_tracks_album ON tracks(album);
             CREATE INDEX IF NOT EXISTS idx_tracks_root ON tracks(root_path);
             CREATE INDEX IF NOT EXISTS idx_tracks_scan_token ON tracks(scan_token);
+            """
+        )
+
+    @staticmethod
+    def _migrate_v1_to_v2(conn: sqlite3.Connection) -> None:
+        """Добавляет отдельные поля DSP-анализа, не смешивая их с тегами файла."""
+        conn.executescript(
+            """
+            ALTER TABLE tracks ADD COLUMN analysis_bpm REAL;
+            ALTER TABLE tracks ADD COLUMN analysis_bpm_confidence REAL;
+            ALTER TABLE tracks ADD COLUMN analysis_key TEXT NOT NULL DEFAULT '';
+            ALTER TABLE tracks ADD COLUMN analysis_scale TEXT NOT NULL DEFAULT '';
+            ALTER TABLE tracks ADD COLUMN analysis_key_strength REAL;
+            ALTER TABLE tracks ADD COLUMN analysis_camelot TEXT NOT NULL DEFAULT '';
+            ALTER TABLE tracks ADD COLUMN analyzed_at TEXT;
             """
         )
 
@@ -254,6 +281,29 @@ class LibraryDatabase:
                         disc_number=excluded.disc_number,
                         bpm=excluded.bpm,
                         musical_key=excluded.musical_key,
+                        analysis_bpm=CASE
+                            WHEN tracks.file_hash=excluded.file_hash THEN tracks.analysis_bpm
+                            ELSE NULL END,
+                        analysis_bpm_confidence=CASE
+                            WHEN tracks.file_hash=excluded.file_hash
+                            THEN tracks.analysis_bpm_confidence
+                            ELSE NULL END,
+                        analysis_key=CASE
+                            WHEN tracks.file_hash=excluded.file_hash THEN tracks.analysis_key
+                            ELSE '' END,
+                        analysis_scale=CASE
+                            WHEN tracks.file_hash=excluded.file_hash THEN tracks.analysis_scale
+                            ELSE '' END,
+                        analysis_key_strength=CASE
+                            WHEN tracks.file_hash=excluded.file_hash
+                            THEN tracks.analysis_key_strength
+                            ELSE NULL END,
+                        analysis_camelot=CASE
+                            WHEN tracks.file_hash=excluded.file_hash THEN tracks.analysis_camelot
+                            ELSE '' END,
+                        analyzed_at=CASE
+                            WHEN tracks.file_hash=excluded.file_hash THEN tracks.analyzed_at
+                            ELSE NULL END,
                         scan_token=excluded.scan_token,
                         updated_at=excluded.updated_at,
                         last_scanned_at=excluded.last_scanned_at
@@ -334,6 +384,17 @@ class LibraryDatabase:
                 return int(conn.execute("SELECT COUNT(*) FROM tracks").fetchone()[0])
         except sqlite3.Error as exc:
             raise DatabaseError(f"Не удалось посчитать треки: {exc}") from exc
+
+    def analysis_counts(self) -> tuple[int, int]:
+        """Возвращает количество всех и уже DSP-проанализированных треков."""
+        try:
+            with self.connection() as conn:
+                row = conn.execute(
+                    "SELECT COUNT(*) AS total, COUNT(analyzed_at) AS analyzed FROM tracks"
+                ).fetchone()
+        except sqlite3.Error as exc:
+            raise DatabaseError(f"Не удалось получить статистику аудио-анализа: {exc}") from exc
+        return int(row["total"]), int(row["analyzed"])
 
     def find_exact_duplicates(self) -> list[DuplicateGroup]:
         """Возвращает группы точных дубликатов по полному SHA-256."""
@@ -419,6 +480,49 @@ class LibraryDatabase:
         except sqlite3.Error as exc:
             raise DatabaseError(f"Не удалось обновить изменённый трек: {exc}") from exc
 
+    def list_tracks_for_analysis(self, *, force: bool = False) -> list[TrackRecord]:
+        """Возвращает треки, которым нужен DSP-анализ, либо всю медиатеку."""
+        where = "" if force else "WHERE analyzed_at IS NULL"
+        try:
+            with self.connection() as conn:
+                rows = conn.execute(
+                    f"SELECT * FROM tracks {where} ORDER BY id"
+                ).fetchall()
+        except sqlite3.Error as exc:
+            raise DatabaseError(f"Не удалось получить очередь аудио-анализа: {exc}") from exc
+        return [self._row_to_track(row) for row in rows]
+
+    def save_audio_analysis(self, track_id: int, analysis: AudioAnalysis) -> None:
+        """Сохраняет рассчитанные BPM/Key отдельно от редактируемых тегов."""
+        analyzed_at = analysis.analyzed_at or self._now()
+        try:
+            with self.connection() as conn:
+                cursor = conn.execute(
+                    """
+                    UPDATE tracks SET
+                        analysis_bpm=?, analysis_bpm_confidence=?,
+                        analysis_key=?, analysis_scale=?, analysis_key_strength=?,
+                        analysis_camelot=?, analyzed_at=?, updated_at=?
+                    WHERE id=?
+                    """,
+                    (
+                        analysis.bpm,
+                        analysis.bpm_confidence,
+                        analysis.musical_key,
+                        analysis.scale,
+                        analysis.key_strength,
+                        analysis.camelot,
+                        analyzed_at,
+                        self._now(),
+                        track_id,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise DatabaseError(f"Трек не найден: {track_id}")
+                conn.commit()
+        except sqlite3.Error as exc:
+            raise DatabaseError(f"Не удалось сохранить аудио-анализ: {exc}") from exc
+
     def set_artwork_url(self, track_id: int, artwork_url: str | None) -> None:
         """Сохраняет найденный URL обложки для трека."""
         try:
@@ -460,4 +564,17 @@ class LibraryDatabase:
                 channels=row["channels"],
             ),
             artwork_url=row["artwork_url"],
+            analysis=(
+                AudioAnalysis(
+                    bpm=row["analysis_bpm"],
+                    bpm_confidence=row["analysis_bpm_confidence"],
+                    musical_key=str(row["analysis_key"] or ""),
+                    scale=str(row["analysis_scale"] or ""),
+                    key_strength=row["analysis_key_strength"],
+                    camelot=str(row["analysis_camelot"] or ""),
+                    analyzed_at=str(row["analyzed_at"] or ""),
+                )
+                if row["analyzed_at"] is not None
+                else None
+            ),
         )

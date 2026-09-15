@@ -9,6 +9,7 @@ from djmaker.infrastructure.database import LibraryDatabase
 from djmaker.logging_config import configure_logging
 from djmaker.plugins.registry import PluginRegistry
 from djmaker.runtime.dependencies import RuntimeDependencies
+from djmaker.services.audio_analysis import EssentiaAudioAnalyzer
 from djmaker.services.audio_tags import AudioTagService
 from djmaker.services.library import LibraryService
 from djmaker.services.organizer import FileOrganizer
@@ -29,11 +30,19 @@ async def flet_main(page: ft.Page) -> None:
     scanner = LibraryScanner(database, tags)
     organizer = FileOrganizer()
     plugins = PluginRegistry()
-    service = LibraryService(database, scanner, tags, organizer, plugins)
+    runtime = RuntimeDependencies(paths.data_dir)
+    analyzer = EssentiaAudioAnalyzer(runtime)
+    service = LibraryService(
+        database,
+        scanner,
+        tags,
+        organizer,
+        plugins,
+        analyzer,
+    )
     workers = BackgroundWorkers(max_workers=4)
     settings_store = SettingsStore(paths.settings_file)
     settings = settings_store.load()
-    runtime = RuntimeDependencies(paths.data_dir)
 
     ui = DJMakerUI(
         page,

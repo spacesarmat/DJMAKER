@@ -68,6 +68,18 @@ class DJMakerUI:
             size=COMPACT_UI.font_xs,
             color=ft.Colors.ON_SURFACE_VARIANT,
         )
+        self.analysis_progress = ft.ProgressBar(
+            width=150,
+            value=0,
+            visible=False,
+        )
+        self.analysis_progress_text = ft.Text(
+            "",
+            size=COMPACT_UI.font_micro,
+            color=ft.Colors.ON_SURFACE_VARIANT,
+            visible=False,
+        )
+        self._analysis_running = False
         self.content = ft.Column(expand=True, spacing=COMPACT_UI.space_md)
         self.theme_button = ft.IconButton(
             icon=theme_mode_icon(self.settings.theme_mode),
@@ -106,6 +118,9 @@ class DJMakerUI:
                         controls=[
                             ft.Icon(ft.Icons.INFO_OUTLINE, size=12),
                             self.status,
+                            ft.Container(expand=True),
+                            self.analysis_progress_text,
+                            self.analysis_progress,
                         ],
                         spacing=COMPACT_UI.space_sm,
                     ),
@@ -316,6 +331,11 @@ class DJMakerUI:
                 self.search,
                 self.busy,
                 ft.Button(
+                    content="BPM / Key",
+                    icon=ft.Icons.SPEED,
+                    on_click=self._start_audio_analysis,
+                ),
+                ft.Button(
                     content="Обновить",
                     icon=ft.Icons.REFRESH,
                     on_click=lambda _: self.show_library(),
@@ -390,6 +410,15 @@ class DJMakerUI:
                         ],
                         expand=True,
                         spacing=2,
+                    ),
+                    ft.Text(
+                        self._analysis_label(track),
+                        size=COMPACT_UI.font_xs,
+                        color=(
+                            ft.Colors.PRIMARY
+                            if track.analysis is not None
+                            else ft.Colors.ON_SURFACE_VARIANT
+                        ),
                     ),
                     ft.Text(
                         f"{duration}  ·  {bitrate}",
@@ -610,15 +639,85 @@ class DJMakerUI:
         )
 
     def show_audio_modules(self) -> None:
-        """Показывает состояние отдельных DSP-модулей."""
+        """Показывает доступные DSP-модули и управление анализом."""
         self._set_navigation_index(4)
-        modules = (
-            (ft.Icons.VOLUME_UP_OUTLINED, "Нормализация", f"Отдельный этап · основной target {DEFAULT_TARGET_LUFS} LUFS"),
-            (ft.Icons.SPEED, "BPM", "Интерфейс подготовлен · алгоритм будет выбран отдельно"),
-            (ft.Icons.MUSIC_NOTE_OUTLINED, "Key / Camelot", "Планируется обычная нотация и Camelot"),
-            (ft.Icons.FINGERPRINT, "Audio fingerprint", "Второй уровень поиска музыкальных дубликатов"),
+        try:
+            total, analyzed = self.service.analysis_counts()
+        except RuntimeError as exc:
+            self._notify(str(exc))
+            return
+
+        pending = max(0, total - analyzed)
+        analysis_card = self._surface_card(
+            ft.Column(
+                controls=[
+                    ft.Row(
+                        controls=[
+                            ft.Icon(ft.Icons.SPEED, size=18, color=ft.Colors.PRIMARY),
+                            ft.Column(
+                                controls=[
+                                    ft.Text(
+                                        "BPM / Key / Camelot",
+                                        weight=ft.FontWeight.BOLD,
+                                    ),
+                                    ft.Text(
+                                        "FFmpeg → mono 44.1 kHz float32 → DJMAKER Essentia",
+                                        size=COMPACT_UI.font_xs,
+                                        color=ft.Colors.ON_SURFACE_VARIANT,
+                                    ),
+                                ],
+                                expand=True,
+                                spacing=2,
+                            ),
+                            ft.Text(
+                                f"Готово: {analyzed}/{total} · в очереди: {pending}",
+                                size=COMPACT_UI.font_xs,
+                            ),
+                        ]
+                    ),
+                    ft.Row(
+                        controls=[
+                            ft.Button(
+                                content="Анализировать новые",
+                                icon=ft.Icons.SPEED,
+                                on_click=self._start_audio_analysis,
+                            ),
+                            ft.Button(
+                                content="Пересчитать всё",
+                                icon=ft.Icons.REFRESH,
+                                on_click=lambda event: self._start_audio_analysis(
+                                    event,
+                                    force=True,
+                                ),
+                            ),
+                        ],
+                        spacing=COMPACT_UI.space_sm,
+                    ),
+                    ft.Text(
+                        "Результат хранится отдельно от тегов файла: BPM, обычная "
+                        "тональность, лад, Camelot и confidence Essentia.",
+                        size=COMPACT_UI.font_xs,
+                        color=ft.Colors.ON_SURFACE_VARIANT,
+                    ),
+                ],
+                spacing=COMPACT_UI.space_sm,
+            )
         )
-        controls = [
+
+        planned = (
+            (
+                ft.Icons.VOLUME_UP_OUTLINED,
+                "Нормализация",
+                f"Отдельный этап · основной target {DEFAULT_TARGET_LUFS} LUFS",
+            ),
+            (
+                ft.Icons.FINGERPRINT,
+                "Audio fingerprint",
+                "Второй уровень поиска музыкальных дубликатов",
+            ),
+        )
+        controls: list[ft.Control] = [analysis_card]
+        controls.extend(
             self._surface_card(
                 ft.Row(
                     controls=[
@@ -635,13 +734,98 @@ class DJMakerUI:
                     ]
                 )
             )
-            for icon, title, description in modules
-        ]
+            for icon, title, description in planned
+        )
         self._replace_content(
             "Аудио-модули",
             "Независимые этапы анализа и обработки аудио",
             *controls,
         )
+
+    def _start_audio_analysis(self, _: object, *, force: bool = False) -> None:
+        if self._analysis_running:
+            self._notify("Аудио-анализ уже выполняется")
+            return
+        self.page.run_task(self._run_audio_analysis, force)
+
+    async def _run_audio_analysis(self, force: bool) -> None:
+        self._analysis_running = True
+        self.analysis_progress.visible = True
+        self.analysis_progress.value = 0
+        self.analysis_progress_text.visible = True
+        self.analysis_progress_text.value = "0/0"
+        self._set_status("Подготовка FFmpeg и Essentia...")
+
+        analyzed = 0
+        errors = 0
+        try:
+            report = await self.workers.run(self.runtime.ensure_all)
+            self.runtime_report = report
+            if not report.ffmpeg.available:
+                raise RuntimeError(f"FFmpeg недоступен: {report.ffmpeg.detail}")
+            if self.runtime.essentia_analyzer_path() is None:
+                raise RuntimeError(
+                    "Собственный DJMAKER Essentia runtime недоступен. "
+                    "Откройте Настройки → Аудио-компоненты."
+                )
+
+            tracks = await self.workers.run(
+                self.service.tracks_for_analysis,
+                force=force,
+            )
+            total = len(tracks)
+            if total == 0:
+                self._notify("Все треки уже проанализированы")
+                return
+
+            self.analysis_progress_text.value = f"0/{total}"
+            self.page.update()
+
+            for index, track in enumerate(tracks, start=1):
+                self.status.value = f"BPM / Key: {track.path.name}"
+                try:
+                    await self.workers.run(self.service.analyze_track, track.id)
+                except Exception as exc:
+                    errors += 1
+                    LOGGER.warning(
+                        "Не удалось проанализировать %s: %s",
+                        track.path,
+                        exc,
+                    )
+                else:
+                    analyzed += 1
+
+                self.analysis_progress.value = index / total
+                self.analysis_progress_text.value = f"{index}/{total}"
+                self.page.update()
+
+            self._notify(
+                f"Аудио-анализ завершён: {analyzed} успешно, {errors} ошибок"
+            )
+            if self.navigation.selected_index == 0:
+                self.show_library()
+            elif self.navigation.selected_index == 4:
+                self.show_audio_modules()
+        except Exception as exc:
+            LOGGER.exception("Ошибка пакетного аудио-анализа")
+            self._notify(f"Не удалось запустить BPM / Key анализ: {exc}")
+        finally:
+            self._analysis_running = False
+            self.analysis_progress.visible = False
+            self.analysis_progress_text.visible = False
+            self.page.update()
+
+    @staticmethod
+    def _analysis_label(track: TrackRecord) -> str:
+        analysis = track.analysis
+        if analysis is None:
+            return "BPM / Key: —"
+        bpm = f"{analysis.bpm:.1f} BPM" if analysis.bpm is not None else "— BPM"
+        key = " ".join(part for part in (analysis.musical_key, analysis.scale) if part)
+        parts = [bpm, key or "—"]
+        if analysis.camelot:
+            parts.append(analysis.camelot)
+        return " · ".join(parts)
 
     async def ensure_runtime_dependencies(self) -> None:
         """Фоново проверяет и устанавливает FFmpeg/Essentia при запуске."""

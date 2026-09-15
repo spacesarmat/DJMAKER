@@ -15,7 +15,9 @@ DJMAKER — кроссплатформенная desktop-программа на
 - MusicBrainz как первый провайдер метаданных;
 - системная, светлая и тёмная тема интерфейса с сохранением выбора;
 - цветовые схемы DJMAKER Blue, Violet, Emerald, Amber и Graphite;
-- точки расширения для нормализации, BPM/Key и аудио-fingerprint.
+- автоматическая установка FFmpeg и собственного Essentia runtime;
+- пакетный BPM / Key / Camelot анализ через FFmpeg → Essentia;
+- точки расширения для нормализации и аудио-fingerprint.
 
 ## Требования
 
@@ -79,7 +81,6 @@ python -m unittest discover -s tests -v
 
 - модуль нормализации с основной целью -11.5 LUFS;
 - аудио-fingerprint для смысловых/музыкальных дубликатов;
-- BPM и Key, включая Camelot;
 - отдельные плагины Discogs, Beatport, Traxsource и DJ-пулов;
 - загрузка/встраивание обложек;
 - пакетная обработка тегов и файлов.

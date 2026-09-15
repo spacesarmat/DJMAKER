@@ -4,9 +4,16 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from djmaker.domain.models import AudioMetadata, DuplicateGroup, MetadataCandidate, ScanStats, TrackRecord
+from djmaker.domain.models import (
+    AudioMetadata,
+    DuplicateGroup,
+    MetadataCandidate,
+    ScanStats,
+    TrackRecord,
+)
 from djmaker.infrastructure.database import LibraryDatabase
 from djmaker.plugins.registry import PluginRegistry
+from djmaker.services.audio_analysis import EssentiaAudioAnalyzer
 from djmaker.services.audio_tags import AudioTagService
 from djmaker.services.organizer import FileOrganizer
 from djmaker.services.scanner import LibraryScanner
@@ -26,12 +33,14 @@ class LibraryService:
         tags: AudioTagService,
         organizer: FileOrganizer,
         plugins: PluginRegistry,
+        analyzer: EssentiaAudioAnalyzer,
     ) -> None:
         self.database = database
         self.scanner = scanner
         self.tags = tags
         self.organizer = organizer
         self.plugins = plugins
+        self.analyzer = analyzer
 
     def scan_folder(self, root: Path) -> ScanStats:
         """Сканирует папку и возвращает статистику."""
@@ -48,6 +57,21 @@ class LibraryService:
     def exact_duplicates(self) -> list[DuplicateGroup]:
         """Возвращает точные дубликаты по SHA-256."""
         return self.database.find_exact_duplicates()
+
+    def analysis_counts(self) -> tuple[int, int]:
+        """Возвращает (всего треков, проанализировано)."""
+        return self.database.analysis_counts()
+
+    def tracks_for_analysis(self, *, force: bool = False) -> list[TrackRecord]:
+        """Возвращает очередь треков для BPM/Key анализа."""
+        return self.database.list_tracks_for_analysis(force=force)
+
+    def analyze_track(self, track_id: int) -> TrackRecord:
+        """Анализирует один трек и сохраняет результат в SQLite."""
+        track = self._require_track(track_id)
+        analysis = self.analyzer.analyze(track.path)
+        self.database.save_audio_analysis(track_id, analysis)
+        return self._require_track(track_id)
 
     def update_tags(self, track_id: int, metadata: AudioMetadata) -> TrackRecord:
         """Записывает теги в файл и синхронизирует запись SQLite."""

@@ -33,6 +33,19 @@ class AudioTechnicalInfo:
 
 
 @dataclass(slots=True)
+class AudioAnalysis:
+    """Результат DSP-анализа трека через FFmpeg + Essentia."""
+
+    bpm: float | None = None
+    bpm_confidence: float | None = None
+    musical_key: str = ""
+    scale: str = ""
+    key_strength: float | None = None
+    camelot: str = ""
+    analyzed_at: str = ""
+
+
+@dataclass(slots=True)
 class InspectedAudio:
     """Результат локального анализа одного аудиофайла."""
 
@@ -55,6 +68,7 @@ class TrackRecord:
     metadata: AudioMetadata
     technical: AudioTechnicalInfo
     artwork_url: str | None = None
+    analysis: AudioAnalysis | None = None
 
 
 @dataclass(slots=True)
