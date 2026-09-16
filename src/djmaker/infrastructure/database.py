@@ -9,6 +9,13 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
+from djmaker.domain.library_sort import (
+    DEFAULT_LIBRARY_SORT,
+    LIBRARY_SORT_LABELS,
+    camelot_order,
+    positive_number,
+    release_year,
+)
 from djmaker.domain.models import (
     AudioAnalysis,
     AudioMetadata,
@@ -409,14 +416,46 @@ class LibraryDatabase:
         except sqlite3.Error as exc:
             raise DatabaseError(f"Не удалось записать ошибку сканирования: {exc}") from exc
 
-    def list_tracks(self, search: str = "", limit: int = 1000) -> list[TrackRecord]:
+    def list_tracks(
+        self,
+        search: str = "",
+        limit: int = 1000,
+        *,
+        sort_by: str = DEFAULT_LIBRARY_SORT,
+        descending: bool = False,
+    ) -> list[TrackRecord]:
         """Возвращает треки с необязательным поиском по основным полям."""
         limit = max(1, min(limit, 10_000))
         search = search.strip()
+        if not isinstance(sort_by, str) or sort_by not in LIBRARY_SORT_LABELS:
+            sort_by = DEFAULT_LIBRARY_SORT
+        direction = "DESC" if descending else "ASC"
+        expressions = {
+            "artist": "NULLIF(TRIM(artist), '') COLLATE DJMAKER_TEXT",
+            "title": "NULLIF(TRIM(title), '') COLLATE DJMAKER_TEXT",
+            "bpm": "COALESCE(positive_number(analysis_bpm), positive_number(bpm))",
+            "camelot": (
+                "COALESCE(camelot_order(analysis_camelot), "
+                "camelot_order(NULLIF(TRIM(analysis_key || ' ' || analysis_scale), '')), "
+                "camelot_order(musical_key))"
+            ),
+            "added": "NULLIF(added_at, '')",
+            "year": "release_year(year)",
+            "duration": "positive_number(duration)",
+        }
+        expression = expressions[sort_by]
+        # SQL-фрагменты выбираются только из фиксированного списка.
+        order_by = f"({expression}) IS NULL, {expression} {direction}"
+        if sort_by == "artist":
+            order_by += (
+                ", NULLIF(TRIM(title), '') IS NULL, "
+                f"title COLLATE DJMAKER_TEXT {direction}"
+            )
+        order_by += ", artist COLLATE DJMAKER_TEXT, title COLLATE DJMAKER_TEXT, id"
         params: tuple[object, ...]
         if search:
             pattern = f"%{search}%"
-            sql = """
+            sql = f"""
                 SELECT * FROM tracks
                 WHERE title LIKE ?
                    OR artist LIKE ?
@@ -428,7 +467,7 @@ class LibraryDatabase:
                    OR analysis_key LIKE ?
                    OR analysis_camelot LIKE ?
                    OR path LIKE ?
-                ORDER BY artist COLLATE NOCASE, album COLLATE NOCASE, track_number, title COLLATE NOCASE
+                ORDER BY {order_by}
                 LIMIT ?
             """
             params = (
@@ -445,15 +484,29 @@ class LibraryDatabase:
                 limit,
             )
         else:
-            sql = """
+            sql = f"""
                 SELECT * FROM tracks
-                ORDER BY artist COLLATE NOCASE, album COLLATE NOCASE, track_number, title COLLATE NOCASE
+                ORDER BY {order_by}
                 LIMIT ?
             """
             params = (limit,)
 
         try:
             with self.connection() as conn:
+                conn.create_collation(
+                    "DJMAKER_TEXT",
+                    lambda left, right: (left.casefold() > right.casefold())
+                    - (left.casefold() < right.casefold()),
+                )
+                conn.create_function(
+                    "positive_number", 1, positive_number, deterministic=True
+                )
+                conn.create_function(
+                    "release_year", 1, release_year, deterministic=True
+                )
+                conn.create_function(
+                    "camelot_order", 1, camelot_order, deterministic=True
+                )
                 rows = conn.execute(sql, params).fetchall()
         except sqlite3.Error as exc:
             raise DatabaseError(f"Не удалось получить медиатеку: {exc}") from exc

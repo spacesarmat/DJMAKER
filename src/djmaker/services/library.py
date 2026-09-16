@@ -79,9 +79,18 @@ class LibraryService:
         """Импортирует dropped-файлы и папки с автоматической фильтрацией."""
         return self.scanner.scan_paths(paths, task=task, progress=progress)
 
-    def tracks(self, search: str = "", limit: int = 1000) -> list[TrackRecord]:
+    def tracks(
+        self,
+        search: str = "",
+        limit: int = 1000,
+        *,
+        sort_by: str = "artist",
+        descending: bool = False,
+    ) -> list[TrackRecord]:
         """Возвращает треки медиатеки."""
-        return self.database.list_tracks(search=search, limit=limit)
+        return self.database.list_tracks(
+            search=search, limit=limit, sort_by=sort_by, descending=descending
+        )
 
     def reset_library(self) -> None:
         """Обнуляет SQLite-медиатеку, не затрагивая музыкальные файлы."""

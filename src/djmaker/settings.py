@@ -11,6 +11,9 @@ from pathlib import Path
 from typing import Any
 
 
+from djmaker.domain.library_sort import DEFAULT_LIBRARY_SORT, LIBRARY_SORT_LABELS
+
+
 LOGGER = logging.getLogger(__name__)
 
 THEME_MODES = ("system", "light", "dark")
@@ -78,6 +81,9 @@ class AppSettings:
     theme_dark_overrides: dict[str, str] = field(default_factory=dict)
     library_scale_percent: int = DEFAULT_LIBRARY_SCALE_PERCENT
 
+    library_sort: str = DEFAULT_LIBRARY_SORT
+    library_sort_descending: bool = False
+
     @classmethod
     def from_mapping(cls, data: dict[str, Any]) -> "AppSettings":
         """Создаёт настройки из словаря, заменяя неизвестные значения дефолтами."""
@@ -103,6 +109,13 @@ class AppSettings:
         ) * LIBRARY_SCALE_STEP
         scale = min(LIBRARY_SCALE_MAX, max(LIBRARY_SCALE_MIN, scale))
 
+        sort = data.get("library_sort", DEFAULT_LIBRARY_SORT)
+        if not isinstance(sort, str) or sort not in LIBRARY_SORT_LABELS:
+            sort = DEFAULT_LIBRARY_SORT
+        descending = data.get("library_sort_descending", False)
+        if not isinstance(descending, bool):
+            descending = False
+
         return cls(
             theme_mode=mode,
             theme_palette=palette,
@@ -113,6 +126,8 @@ class AppSettings:
                 data.get("theme_dark_overrides")
             ),
             library_scale_percent=scale,
+            library_sort=sort,
+            library_sort_descending=descending,
         )
 
 

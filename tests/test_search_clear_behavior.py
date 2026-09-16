@@ -98,7 +98,9 @@ class SearchClearBehaviorTests(unittest.IsolatedAsyncioTestCase):
 
         ui._clear_search(None)
 
-        ui.service.tracks.assert_called_once_with("", limit=1000)
+        ui.service.tracks.assert_called_once_with(
+            "", limit=1000, sort_by="artist", descending=False
+        )
         self.assertEqual(len(ui._library_list.controls), 2)
         self.assertEqual(ui._library_track_indices, {1: 0, 2: 1})
         self.assertEqual(ui._library_list.item_extent, ui._track_item_extent())

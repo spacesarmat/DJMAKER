@@ -17,6 +17,7 @@ except ImportError:  # pragma: no cover - зависит от desktop extension 
     ftd = None
 
 from djmaker.config import DEFAULT_ORGANIZE_TEMPLATE, DEFAULT_TARGET_LUFS, AppPaths
+from djmaker.domain.library_sort import LIBRARY_SORT_LABELS
 from djmaker.domain.models import (
     AudioMetadata,
     EmbeddedArtwork,
@@ -1294,6 +1295,7 @@ class DJMakerUI:
                         color=ft.Colors.PRIMARY,
                     ),
                     self.search,
+                    self._library_sort_control(),
                     ft.Container(
                         width=1,
                         height=22,
@@ -1309,6 +1311,77 @@ class DJMakerUI:
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
             ),
         )
+
+    def _library_sort_control(self) -> ft.Row:
+        """Выбор порядка не зависит от масштаба строк медиатеки."""
+        descending = self.settings.library_sort_descending
+        return ft.Row(
+            controls=[
+                ft.Dropdown(
+                    label="Сортировка",
+                    width=210,
+                    dense=True,
+                    text_size=COMPACT_UI.font_sm,
+                    value=self.settings.library_sort,
+                    options=[
+                        ft.DropdownOption(key=key, text=label)
+                        for key, label in LIBRARY_SORT_LABELS.items()
+                    ],
+                    on_select=self._on_library_sort_selected,
+                ),
+                ft.IconButton(
+                    icon=(
+                        ft.Icons.ARROW_DOWNWARD
+                        if descending else ft.Icons.ARROW_UPWARD
+                    ),
+                    icon_size=COMPACT_UI.action_icon_size,
+                    tooltip=(
+                        "По убыванию. Переключить на возрастание"
+                        if descending else
+                        "По возрастанию. Переключить на убывание"
+                    ),
+                    on_click=self._toggle_library_sort_direction,
+                ),
+            ],
+            spacing=0,
+            tight=True,
+        )
+
+    def _on_library_sort_selected(self, event: object) -> None:
+        control = getattr(event, "control", None)
+        value = getattr(control, "value", None)
+        if not isinstance(value, str) or value not in LIBRARY_SORT_LABELS:
+            return
+        settings = replace(self.settings, library_sort=value)
+        if not self._apply_library_sort(settings):
+            control.value = self.settings.library_sort
+            self.page.update(control)
+
+    def _toggle_library_sort_direction(self, _: object) -> None:
+        self._apply_library_sort(replace(
+            self.settings,
+            library_sort_descending=not self.settings.library_sort_descending,
+        ))
+
+    def _apply_library_sort(self, settings: AppSettings) -> bool:
+        if settings == self.settings:
+            return True
+        try:
+            self.settings_store.save(settings)
+        except OSError as exc:
+            LOGGER.exception("Не удалось сохранить сортировку")
+            self._notify(f"Не удалось сохранить сортировку: {exc}")
+            return False
+        self.settings = settings
+        self._search_revision += 1
+        selected_track_id = self._selected_track_id
+        self.show_library(local_update=True)
+        if (
+            selected_track_id is not None
+            and selected_track_id in self._library_track_indices
+        ):
+            self.page.run_task(self._select_library_track, selected_track_id)
+        return True
 
     def _library_size(
         self,
@@ -1402,7 +1475,11 @@ class DJMakerUI:
         """Отображает локальную медиатеку."""
         self._set_navigation_index(0)
         try:
-            tracks = self.service.tracks(self.search.value or "", limit=1000)
+            tracks = self.service.tracks(
+                self.search.value or "", limit=1000,
+                sort_by=self.settings.library_sort,
+                descending=self.settings.library_sort_descending,
+            )
         except RuntimeError as exc:
             self._notify(str(exc))
             return
