@@ -1209,11 +1209,15 @@ class DJMakerUI:
         title: str,
         subtitle: str,
         *controls: ft.Control,
+        local_update: bool = False,
     ) -> None:
         del title, subtitle
         self.content.controls.clear()
         self.content.controls.extend(controls)
-        self.page.update()
+        if local_update:
+            self.page.update(self.content)
+        else:
+            self.page.update()
 
     @staticmethod
     def _surface_card(
@@ -1251,13 +1255,13 @@ class DJMakerUI:
     async def _on_search(self, _: object) -> None:
         """Немедленно применяет поисковый запрос по Enter."""
         self._search_revision += 1
-        self.show_library()
+        self.show_library(local_update=True)
 
     def _on_search_change(self, _: object) -> None:
         """Дебаунсит живой поиск, чтобы не перестраивать 1000 строк на каждый символ."""
         self._search_revision += 1
         revision = self._search_revision
-        self.search_clear_button.visible = bool((self.search.value or "").strip())
+        self.search_clear_button.visible = bool(self.search.value)
         self.page.update(self.search_clear_button)
         self.page.run_task(self._debounced_library_search, revision)
 
@@ -1265,13 +1269,13 @@ class DJMakerUI:
         await asyncio.sleep(_LIBRARY_SEARCH_DEBOUNCE_SECONDS)
         if revision != self._search_revision or self.navigation.selected_index != 0:
             return
-        self.show_library()
+        self.show_library(local_update=True)
 
     def _clear_search(self, _: object) -> None:
         self.search.value = ""
         self.search_clear_button.visible = False
         self._search_revision += 1
-        self.show_library()
+        self.show_library(local_update=True)
 
     def _build_library_search_block(self, result_count: int) -> ft.Container:
         """Возвращает тематический поисковый блок медиатеки."""
@@ -1394,7 +1398,7 @@ class DJMakerUI:
                 selected_track_id,
             )
 
-    def show_library(self) -> None:
+    def show_library(self, *, local_update: bool = False) -> None:
         """Отображает локальную медиатеку."""
         self._set_navigation_index(0)
         try:
@@ -1460,13 +1464,14 @@ class DJMakerUI:
                 scroll_interval=50,
             )
         self._library_list = listing
-        self.search_clear_button.visible = bool((self.search.value or "").strip())
+        self.search_clear_button.visible = bool(self.search.value)
         self._replace_content(
             "Медиатека",
             "Поиск, теги и организация локальной музыкальной коллекции",
             actions,
             self._build_library_search_block(len(tracks)),
             listing,
+            local_update=local_update,
         )
 
     def _track_item_extent(self) -> float:
