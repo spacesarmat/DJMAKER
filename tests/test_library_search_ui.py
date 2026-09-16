@@ -17,6 +17,8 @@ class LibrarySearchUITests(unittest.TestCase):
         self.assertIn("def _build_library_search_block", source)
         self.assertIn("bgcolor=ft.Colors.SURFACE_CONTAINER", source)
         self.assertIn('tooltip="Очистить поиск"', source)
+        self.assertIn("border=ft.InputBorder.NONE", source)
+        self.assertIn("suffix=self.search_clear_button", source)
         self.assertIn('f"Найдено: {result_count}"', source)
 
     def test_live_search_is_debounced(self) -> None:

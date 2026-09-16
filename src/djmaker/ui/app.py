@@ -45,11 +45,14 @@ from djmaker.services.workers import BackgroundWorkers
 from djmaker.settings import (
     AppSettings,
     SettingsStore,
+    LIBRARY_SCALE_MAX,
+    LIBRARY_SCALE_MIN,
+    LIBRARY_SCALE_STEP,
     THEME_COLOR_ROLES,
     THEME_MODES,
     is_valid_theme_color,
 )
-from djmaker.ui.density import COMPACT_UI
+from djmaker.ui.density import COMPACT_UI, scaled_library_size
 from djmaker.ui.scrolling import centered_scroll_offset
 from djmaker.ui.theme import (
     THEME_MODE_LABELS,
@@ -174,15 +177,6 @@ class DJMakerUI:
         self._player_switching = False
         self._player_request_revision = 0
 
-        self.search = ft.TextField(
-            hint_text="Исполнитель, название, альбом, жанр, формат или путь",
-            expand=True,
-            dense=True,
-            text_size=COMPACT_UI.font_sm,
-            content_padding=ft.Padding.symmetric(horizontal=8, vertical=4),
-            on_change=self._on_search_change,
-            on_submit=self._on_search,
-        )
         self.search_clear_button = ft.IconButton(
             icon=ft.Icons.CLOSE,
             icon_size=COMPACT_UI.action_icon_size,
@@ -191,6 +185,17 @@ class DJMakerUI:
             tooltip="Очистить поиск",
             visible=False,
             on_click=self._clear_search,
+        )
+        self.search = ft.TextField(
+            hint_text="Исполнитель, название, альбом, жанр, формат или путь",
+            expand=True,
+            dense=True,
+            border=ft.InputBorder.NONE,
+            text_size=COMPACT_UI.font_sm,
+            content_padding=ft.Padding.symmetric(horizontal=8, vertical=4),
+            suffix=self.search_clear_button,
+            on_change=self._on_search_change,
+            on_submit=self._on_search,
         )
         self.busy = ft.ProgressRing(width=16, height=16, visible=False)
         self.status = ft.Text(
@@ -669,11 +674,14 @@ class DJMakerUI:
         self.player_progress.value = (position / duration) if duration > 0 else 0.0
 
     @staticmethod
-    def _waveform_width() -> int:
+    def _base_waveform_width() -> int:
         return (
             COMPACT_UI.waveform_bar_count * COMPACT_UI.waveform_bar_width
             + (COMPACT_UI.waveform_bar_count - 1) * COMPACT_UI.waveform_bar_gap
         )
+
+    def _waveform_width(self) -> float:
+        return self._library_size(self._base_waveform_width())
 
     @staticmethod
     def _waveform_svg(
@@ -681,7 +689,7 @@ class DJMakerUI:
         played_bars: int | None = None,
     ) -> str:
         """Рисует waveform одним SVG вместо десятков Flet-контролов."""
-        width = DJMakerUI._waveform_width()
+        width = DJMakerUI._base_waveform_width()
         height = COMPACT_UI.waveform_height
         limit = len(peaks) if played_bars is None else max(0, played_bars)
         rectangles: list[str] = []
@@ -1211,7 +1219,7 @@ class DJMakerUI:
     def _surface_card(
         content: ft.Control,
         *,
-        padding: int = COMPACT_UI.card_padding,
+        padding: float = COMPACT_UI.card_padding,
     ) -> ft.Container:
         """Возвращает стандартную карточку для экранов приложения."""
         return ft.Container(
@@ -1282,7 +1290,6 @@ class DJMakerUI:
                         color=ft.Colors.PRIMARY,
                     ),
                     self.search,
-                    self.search_clear_button,
                     ft.Container(
                         width=1,
                         height=22,
@@ -1298,6 +1305,94 @@ class DJMakerUI:
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
             ),
         )
+
+    def _library_size(
+        self,
+        value: float,
+        *,
+        minimum: float = 1.0,
+    ) -> float:
+        """Возвращает размер элемента строки с учётом масштаба медиатеки."""
+        return scaled_library_size(
+            value,
+            self.settings.library_scale_percent,
+            minimum=minimum,
+        )
+
+    def _library_scale_control(self) -> ft.Control:
+        """Строит компактное управление масштабом строк медиатеки."""
+        percent = self.settings.library_scale_percent
+        return ft.Container(
+            bgcolor=ft.Colors.SURFACE_CONTAINER,
+            border_radius=COMPACT_UI.radius,
+            padding=ft.Padding.symmetric(horizontal=COMPACT_UI.space_xs),
+            content=ft.Row(
+                controls=[
+                    ft.IconButton(
+                        icon=ft.Icons.ZOOM_OUT,
+                        icon_size=COMPACT_UI.action_icon_size,
+                        padding=COMPACT_UI.space_xs,
+                        visual_density=ft.VisualDensity.COMPACT,
+                        tooltip="Уменьшить строки",
+                        disabled=percent <= LIBRARY_SCALE_MIN,
+                        on_click=lambda _: self._change_library_scale(
+                            -LIBRARY_SCALE_STEP
+                        ),
+                    ),
+                    ft.Text(
+                        f"{percent}%",
+                        width=34,
+                        text_align=ft.TextAlign.CENTER,
+                        size=COMPACT_UI.font_xs,
+                        weight=ft.FontWeight.BOLD,
+                    ),
+                    ft.IconButton(
+                        icon=ft.Icons.ZOOM_IN,
+                        icon_size=COMPACT_UI.action_icon_size,
+                        padding=COMPACT_UI.space_xs,
+                        visual_density=ft.VisualDensity.COMPACT,
+                        tooltip="Увеличить строки",
+                        disabled=percent >= LIBRARY_SCALE_MAX,
+                        on_click=lambda _: self._change_library_scale(
+                            LIBRARY_SCALE_STEP
+                        ),
+                    ),
+                ],
+                spacing=0,
+                tight=True,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+        )
+
+    def _change_library_scale(self, delta: int) -> None:
+        """Сохраняет новый масштаб и немедленно перестраивает медиатеку."""
+        current = self.settings.library_scale_percent
+        target = min(
+            LIBRARY_SCALE_MAX,
+            max(LIBRARY_SCALE_MIN, current + delta),
+        )
+        if target == current:
+            return
+
+        settings = replace(self.settings, library_scale_percent=target)
+        try:
+            self.settings_store.save(settings)
+        except OSError as exc:
+            LOGGER.exception("Не удалось сохранить масштаб медиатеки")
+            self._notify(f"Не удалось сохранить масштаб: {exc}")
+            return
+
+        self.settings = settings
+        selected_track_id = self._selected_track_id
+        self.show_library()
+        if (
+            selected_track_id is not None
+            and selected_track_id in self._library_track_indices
+        ):
+            self.page.run_task(
+                self._select_library_track,
+                selected_track_id,
+            )
 
     def show_library(self) -> None:
         """Отображает локальную медиатеку."""
@@ -1327,6 +1422,7 @@ class DJMakerUI:
                     icon=ft.Icons.REFRESH,
                     on_click=lambda _: self.show_library(),
                 ),
+                self._library_scale_control(),
                 self.theme_button,
             ],
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
@@ -1373,13 +1469,12 @@ class DJMakerUI:
             listing,
         )
 
-    @staticmethod
-    def _track_item_extent() -> float:
-        """Высота строки медиатеки с межстрочным интервалом."""
-        return float(
-            COMPACT_UI.track_icon_box
-            + COMPACT_UI.card_padding * 2
-            + COMPACT_UI.space_sm
+    def _track_item_extent(self) -> float:
+        """Высота строки медиатеки с учётом пользовательского масштаба."""
+        return (
+            self._library_size(COMPACT_UI.track_icon_box)
+            + self._library_size(COMPACT_UI.card_padding) * 2
+            + self._library_size(COMPACT_UI.space_sm)
         )
 
     def _estimated_library_viewport_extent(self) -> float:
@@ -1449,7 +1544,7 @@ class DJMakerUI:
                 self._track_path_link(track),
             ],
             expand=True,
-            height=COMPACT_UI.track_icon_box,
+            height=self._library_size(COMPACT_UI.track_icon_box),
             spacing=0,
             alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
         )
@@ -1461,8 +1556,8 @@ class DJMakerUI:
                     self._track_waveform(track),
                     ft.IconButton(
                         icon=ft.Icons.EDIT_OUTLINED,
-                        icon_size=COMPACT_UI.action_icon_size,
-                        padding=COMPACT_UI.space_xs,
+                        icon_size=self._library_size(COMPACT_UI.action_icon_size),
+                        padding=self._library_size(COMPACT_UI.space_xs),
                         visual_density=ft.VisualDensity.COMPACT,
                         tooltip="Редактировать теги",
                         on_click=lambda _, track_id=track.id: self._open_tag_editor(
@@ -1471,8 +1566,8 @@ class DJMakerUI:
                     ),
                     ft.IconButton(
                         icon=ft.Icons.DRIVE_FILE_MOVE_OUTLINED,
-                        icon_size=COMPACT_UI.action_icon_size,
-                        padding=COMPACT_UI.space_xs,
+                        icon_size=self._library_size(COMPACT_UI.action_icon_size),
+                        padding=self._library_size(COMPACT_UI.space_xs),
                         visual_density=ft.VisualDensity.COMPACT,
                         tooltip="Организовать файл",
                         on_click=lambda _, track_id=track.id: self._open_organizer(
@@ -1481,8 +1576,8 @@ class DJMakerUI:
                     ),
                     ft.IconButton(
                         icon=ft.Icons.SEARCH,
-                        icon_size=COMPACT_UI.action_icon_size,
-                        padding=COMPACT_UI.space_xs,
+                        icon_size=self._library_size(COMPACT_UI.action_icon_size),
+                        padding=self._library_size(COMPACT_UI.space_xs),
                         visual_density=ft.VisualDensity.COMPACT,
                         tooltip="Найти метаданные",
                         on_click=lambda _, track_id=track.id: (
@@ -1491,8 +1586,9 @@ class DJMakerUI:
                     ),
                 ],
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                spacing=COMPACT_UI.space_sm,
-            )
+                spacing=self._library_size(COMPACT_UI.space_sm),
+            ),
+            padding=self._library_size(COMPACT_UI.card_padding),
         )
         card.bgcolor = (
             ft.Colors.SURFACE_CONTAINER_HIGH
@@ -1502,7 +1598,9 @@ class DJMakerUI:
         self._track_row_cards[track.id] = card
         return ft.Container(
             height=self._track_item_extent(),
-            padding=ft.Padding.only(bottom=COMPACT_UI.space_sm),
+            padding=ft.Padding.only(
+                bottom=self._library_size(COMPACT_UI.space_sm)
+            ),
             content=ft.GestureDetector(
                 content=card,
                 on_tap=lambda _, track_id=track.id: self.page.run_task(
@@ -1525,14 +1623,14 @@ class DJMakerUI:
                     expand=True,
                     expand_loose=True,
                     weight=ft.FontWeight.BOLD,
-                    size=COMPACT_UI.font_sm,
+                    size=self._library_size(COMPACT_UI.font_sm, minimum=6.0),
                     max_lines=1,
                     overflow=ft.TextOverflow.ELLIPSIS,
                 ),
                 self._track_tag(self._track_key_label(track), accent=True),
                 self._track_tag(self._track_bpm_label(track), accent=True),
             ],
-            spacing=COMPACT_UI.space_xs,
+            spacing=self._library_size(COMPACT_UI.space_xs),
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
 
@@ -1541,7 +1639,7 @@ class DJMakerUI:
         controls: list[ft.Control] = [
             ft.Text(
                 self._format_duration(track.technical.duration),
-                size=COMPACT_UI.font_xs,
+                size=self._library_size(COMPACT_UI.font_xs, minimum=5.5),
                 color=ft.Colors.ON_SURFACE,
             )
         ]
@@ -1552,7 +1650,7 @@ class DJMakerUI:
             ft.Text(
                 album,
                 expand=True,
-                size=COMPACT_UI.font_xs,
+                size=self._library_size(COMPACT_UI.font_xs, minimum=5.5),
                 color=ft.Colors.ON_SURFACE_VARIANT,
                 max_lines=1,
                 overflow=ft.TextOverflow.ELLIPSIS,
@@ -1560,7 +1658,7 @@ class DJMakerUI:
         )
         return ft.Row(
             controls=controls,
-            spacing=COMPACT_UI.space_xs,
+            spacing=self._library_size(COMPACT_UI.space_xs),
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
 
@@ -1570,31 +1668,30 @@ class DJMakerUI:
                 controls=[
                     ft.Icon(
                         ft.Icons.FOLDER_OPEN_OUTLINED,
-                        size=COMPACT_UI.font_xs,
+                        size=self._library_size(COMPACT_UI.font_xs, minimum=5.5),
                         color=ft.Colors.PRIMARY,
                     ),
                     ft.Text(
                         str(track.path),
                         expand=True,
-                        size=COMPACT_UI.font_micro,
+                        size=self._library_size(COMPACT_UI.font_micro, minimum=5.0),
                         color=ft.Colors.PRIMARY,
                         max_lines=1,
                         overflow=ft.TextOverflow.ELLIPSIS,
                     ),
                 ],
-                spacing=COMPACT_UI.space_xs,
+                spacing=self._library_size(COMPACT_UI.space_xs),
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
             ),
             on_double_tap=lambda _, current=track: self._reveal_track_file(current),
             mouse_cursor=ft.MouseCursor.CLICK,
         )
 
-    @staticmethod
-    def _track_tag(label: str, *, accent: bool = False) -> ft.Control:
+    def _track_tag(self, label: str, *, accent: bool = False) -> ft.Control:
         return ft.Container(
-            height=12,
-            padding=ft.Padding.symmetric(horizontal=4),
-            border_radius=4,
+            height=self._library_size(12, minimum=8.0),
+            padding=ft.Padding.symmetric(horizontal=self._library_size(4)),
+            border_radius=self._library_size(4),
             bgcolor=(
                 ft.Colors.PRIMARY_CONTAINER
                 if accent
@@ -1612,7 +1709,7 @@ class DJMakerUI:
             ),
             content=ft.Text(
                 label,
-                size=COMPACT_UI.font_micro,
+                size=self._library_size(COMPACT_UI.font_micro, minimum=5.0),
                 color=(
                     ft.Colors.ON_PRIMARY_CONTAINER
                     if accent
@@ -1712,14 +1809,14 @@ class DJMakerUI:
     def _track_artwork(self, track: TrackRecord) -> ft.Control:
         """Показывает кликабельную обложку с embedded/online fallback."""
         fallback = ft.Container(
-            width=COMPACT_UI.track_icon_box,
-            height=COMPACT_UI.track_icon_box,
-            border_radius=6,
+            width=self._library_size(COMPACT_UI.track_icon_box),
+            height=self._library_size(COMPACT_UI.track_icon_box),
+            border_radius=self._library_size(6),
             bgcolor=ft.Colors.PRIMARY_CONTAINER,
             alignment=ft.Alignment.CENTER,
             content=ft.Icon(
                 ft.Icons.MUSIC_NOTE,
-                size=COMPACT_UI.track_icon_size,
+                size=self._library_size(COMPACT_UI.track_icon_size),
                 color=ft.Colors.ON_PRIMARY_CONTAINER,
             ),
         )
@@ -1727,10 +1824,10 @@ class DJMakerUI:
         def image(source: str, error_content: ft.Control) -> ft.Image:
             return ft.Image(
                 src=source,
-                width=COMPACT_UI.track_icon_box,
-                height=COMPACT_UI.track_icon_box,
+                width=self._library_size(COMPACT_UI.track_icon_box),
+                height=self._library_size(COMPACT_UI.track_icon_box),
                 fit=ft.BoxFit.COVER,
-                border_radius=6,
+                border_radius=self._library_size(6),
                 error_content=error_content,
                 cache_width=128,
                 cache_height=128,
@@ -1774,7 +1871,7 @@ class DJMakerUI:
         base_image = ft.Image(
             src=self._waveform_svg(normalized_peaks),
             width=self._waveform_width(),
-            height=COMPACT_UI.waveform_height,
+            height=self._library_size(COMPACT_UI.waveform_height),
             fit=ft.BoxFit.FILL,
             color=ft.Colors.SURFACE_CONTAINER_HIGHEST,
             exclude_from_semantics=True,
@@ -1782,7 +1879,7 @@ class DJMakerUI:
         progress_image = ft.Image(
             src=self._waveform_svg(normalized_peaks, played),
             width=self._waveform_width(),
-            height=COMPACT_UI.waveform_height,
+            height=self._library_size(COMPACT_UI.waveform_height),
             fit=ft.BoxFit.FILL,
             color=ft.Colors.PRIMARY,
             exclude_from_semantics=True,
@@ -1795,12 +1892,12 @@ class DJMakerUI:
 
         waveform = ft.Container(
             width=self._waveform_width(),
-            height=COMPACT_UI.track_icon_box,
+            height=self._library_size(COMPACT_UI.track_icon_box),
             alignment=ft.Alignment.CENTER,
             content=ft.Stack(
                 controls=[base_image, progress_image],
                 width=self._waveform_width(),
-                height=COMPACT_UI.waveform_height,
+                height=self._library_size(COMPACT_UI.waveform_height),
             ),
         )
         return ft.GestureDetector(

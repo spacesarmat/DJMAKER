@@ -26,6 +26,11 @@ THEME_PALETTES = (
 DEFAULT_THEME_MODE = "system"
 DEFAULT_THEME_PALETTE = "djmaker_blue"
 
+LIBRARY_SCALE_MIN = 70
+LIBRARY_SCALE_MAX = 150
+LIBRARY_SCALE_STEP = 10
+DEFAULT_LIBRARY_SCALE_PERCENT = 100
+
 THEME_COLOR_ROLES = (
     "primary",
     "on_primary",
@@ -71,6 +76,7 @@ class AppSettings:
     theme_palette: str = DEFAULT_THEME_PALETTE
     theme_light_overrides: dict[str, str] = field(default_factory=dict)
     theme_dark_overrides: dict[str, str] = field(default_factory=dict)
+    library_scale_percent: int = DEFAULT_LIBRARY_SCALE_PERCENT
 
     @classmethod
     def from_mapping(cls, data: dict[str, Any]) -> "AppSettings":
@@ -83,6 +89,20 @@ class AppSettings:
         if palette not in THEME_PALETTES:
             palette = DEFAULT_THEME_PALETTE
 
+        raw_scale = data.get(
+            "library_scale_percent", DEFAULT_LIBRARY_SCALE_PERCENT
+        )
+        try:
+            scale = int(raw_scale)
+        except (TypeError, ValueError):
+            scale = DEFAULT_LIBRARY_SCALE_PERCENT
+        scale = min(LIBRARY_SCALE_MAX, max(LIBRARY_SCALE_MIN, scale))
+        scale = LIBRARY_SCALE_MIN + (
+            (scale - LIBRARY_SCALE_MIN + LIBRARY_SCALE_STEP // 2)
+            // LIBRARY_SCALE_STEP
+        ) * LIBRARY_SCALE_STEP
+        scale = min(LIBRARY_SCALE_MAX, max(LIBRARY_SCALE_MIN, scale))
+
         return cls(
             theme_mode=mode,
             theme_palette=palette,
@@ -92,6 +112,7 @@ class AppSettings:
             theme_dark_overrides=normalize_theme_overrides(
                 data.get("theme_dark_overrides")
             ),
+            library_scale_percent=scale,
         )
 
 

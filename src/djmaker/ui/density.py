@@ -63,4 +63,15 @@ class UIDensity:
     table_column_spacing: int = 12
 
 
+def scaled_library_size(
+    value: float,
+    scale_percent: int,
+    *,
+    minimum: float = 1.0,
+) -> float:
+    """Масштабирует геометрию строки медиатеки относительно базового профиля."""
+    factor = scale_percent / 100.0
+    return max(minimum, round(float(value) * factor, 2))
+
+
 COMPACT_UI = UIDensity()

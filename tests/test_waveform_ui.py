@@ -69,7 +69,7 @@ class WaveformUITests(unittest.TestCase):
         self.assertIn("self._track_detail_tags(track)", source)
         self.assertIn("def _track_path_link", source)
         self.assertIn("on_double_tap=", source)
-        self.assertIn("height=COMPACT_UI.track_icon_box", source)
+        self.assertIn("height=self._library_size(COMPACT_UI.track_icon_box)", source)
 
     def test_waveform_background_task_starts_with_application(self) -> None:
         source = APP_SOURCE.read_text(encoding="utf-8")

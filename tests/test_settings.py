@@ -5,7 +5,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from djmaker.settings import AppSettings, SettingsStore
+from djmaker.settings import (
+    AppSettings,
+    LIBRARY_SCALE_MAX,
+    LIBRARY_SCALE_MIN,
+    SettingsStore,
+)
 
 
 class SettingsStoreTests(unittest.TestCase):
@@ -37,6 +42,39 @@ class SettingsStoreTests(unittest.TestCase):
 
             self.assertEqual("system", settings.theme_mode)
             self.assertEqual("djmaker_blue", settings.theme_palette)
+
+    def test_library_scale_round_trips_and_is_clamped(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "settings.json"
+            store = SettingsStore(path)
+            expected = AppSettings(library_scale_percent=130)
+
+            store.save(expected)
+
+            self.assertEqual(130, store.load().library_scale_percent)
+            self.assertEqual(
+                LIBRARY_SCALE_MIN,
+                AppSettings.from_mapping(
+                    {"library_scale_percent": 10}
+                ).library_scale_percent,
+            )
+            self.assertEqual(
+                LIBRARY_SCALE_MAX,
+                AppSettings.from_mapping(
+                    {"library_scale_percent": 999}
+                ).library_scale_percent,
+            )
+            self.assertEqual(
+                130,
+                AppSettings.from_mapping(
+                    {"library_scale_percent": 126}
+                ).library_scale_percent,
+            )
+
+    def test_invalid_library_scale_uses_default(self) -> None:
+        settings = AppSettings.from_mapping({"library_scale_percent": "broken"})
+
+        self.assertEqual(100, settings.library_scale_percent)
 
     def test_broken_json_falls_back_to_defaults(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

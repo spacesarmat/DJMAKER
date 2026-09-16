@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import unittest
 
-from djmaker.ui.density import COMPACT_UI, UI_SCALE
+from djmaker.ui.density import COMPACT_UI, UI_SCALE, scaled_library_size
 
 
 class UIDensityTests(unittest.TestCase):
@@ -21,6 +21,12 @@ class UIDensityTests(unittest.TestCase):
             COMPACT_UI.table_row_min_height,
         )
         self.assertLessEqual(COMPACT_UI.table_heading_height, 32)
+
+    def test_library_size_scales_around_current_profile(self) -> None:
+        self.assertEqual(28.0, scaled_library_size(40, 70))
+        self.assertEqual(40.0, scaled_library_size(40, 100))
+        self.assertEqual(60.0, scaled_library_size(40, 150))
+        self.assertEqual(5.0, scaled_library_size(2, 70, minimum=5.0))
 
     def test_text_keeps_desktop_readability_floor(self) -> None:
         self.assertGreaterEqual(COMPACT_UI.font_micro, 7)
