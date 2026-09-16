@@ -8,6 +8,7 @@ from pathlib import Path
 from djmaker.domain.models import (
     AudioMetadata,
     DuplicateGroup,
+    EmbeddedArtwork,
     MetadataCandidate,
     ScanStats,
     TrackRecord,
@@ -17,6 +18,7 @@ from djmaker.plugins.registry import PluginRegistry
 from djmaker.services.audio_analysis import EssentiaAudioAnalyzer
 from djmaker.services.artwork import ArtworkCache
 from djmaker.services.audio_tags import AudioTagService
+from djmaker.services.drop_import import DropImportPlan
 from djmaker.services.organizer import FileOrganizer
 from djmaker.services.scanner import LibraryScanner
 from djmaker.services.tasks import TaskControl
@@ -60,6 +62,23 @@ class LibraryService:
         """Сканирует папку и возвращает статистику."""
         return self.scanner.scan(root, task=task, progress=progress)
 
+    def plan_import_paths(
+        self,
+        paths: tuple[Path, ...] | list[Path],
+    ) -> DropImportPlan:
+        """Фильтрует dropped-пути до создания фоновой задачи."""
+        return self.scanner.plan_paths(paths)
+
+    def import_paths(
+        self,
+        paths: tuple[Path, ...] | list[Path],
+        *,
+        task: TaskControl | None = None,
+        progress: Callable[[ScanStats, Path], None] | None = None,
+    ) -> ScanStats:
+        """Импортирует dropped-файлы и папки с автоматической фильтрацией."""
+        return self.scanner.scan_paths(paths, task=task, progress=progress)
+
     def tracks(self, search: str = "", limit: int = 1000) -> list[TrackRecord]:
         """Возвращает треки медиатеки."""
         return self.database.list_tracks(search=search, limit=limit)
@@ -75,6 +94,10 @@ class LibraryService:
     def roots(self) -> list[Path]:
         """Возвращает корневые музыкальные папки."""
         return self.database.list_roots()
+
+    def prepare_artwork(self, data: bytes) -> EmbeddedArtwork:
+        """Проверяет выбранные пользователем bytes встроенной обложки."""
+        return self.tags.prepare_artwork(data)
 
     def exact_duplicates(self) -> list[DuplicateGroup]:
         """Возвращает точные дубликаты по SHA-256."""
@@ -167,10 +190,41 @@ class LibraryService:
         self.database.save_audio_analysis(track_id, analysis)
         return self._require_track(track_id)
 
-    def update_tags(self, track_id: int, metadata: AudioMetadata) -> TrackRecord:
-        """Записывает теги в файл и синхронизирует запись SQLite."""
+    def update_tags(
+        self,
+        track_id: int,
+        metadata: AudioMetadata,
+        *,
+        replace_artwork: bool = False,
+        artwork: EmbeddedArtwork | None = None,
+    ) -> TrackRecord:
+        """Записывает теги/обложку в файл и синхронизирует SQLite."""
         track = self._require_track(track_id)
         self.tags.write(track.path, metadata)
+
+        if replace_artwork:
+            try:
+                self.tags.write_artwork(track.path, artwork)
+            except Exception:
+                # Основные теги уже могли быть успешно записаны. Не оставляем
+                # SQLite со старым hash/mtime даже при ошибке смены обложки.
+                self._sync_changed_track(track_id, track)
+                raise
+
+        return self._sync_changed_track(
+            track_id,
+            track,
+            refresh_artwork=replace_artwork,
+        )
+
+    def _sync_changed_track(
+        self,
+        track_id: int,
+        track: TrackRecord,
+        *,
+        refresh_artwork: bool = False,
+    ) -> TrackRecord:
+        """Перечитывает изменённый файл и обновляет его техническую запись."""
         inspected, file_hash, stat = self.scanner.inspect_and_hash(track.path)
         self.database.update_after_file_change(
             track_id,
@@ -182,6 +236,14 @@ class LibraryService:
             metadata=inspected.metadata,
             technical=inspected.technical,
         )
+
+        if refresh_artwork:
+            try:
+                artwork_path = self.artwork_cache.store(inspected.artwork)
+            except RuntimeError:
+                self.database.set_embedded_artwork(track_id, None)
+                raise
+            self.database.set_embedded_artwork(track_id, artwork_path)
         return self._require_track(track_id)
 
     def organize_track(self, track_id: int, destination: Path, template: str) -> TrackRecord:

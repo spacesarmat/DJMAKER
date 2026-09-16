@@ -10,8 +10,9 @@ from mutagen import File, MutagenError
 from mutagen.apev2 import APEv2File
 from mutagen.asf import ASF
 from mutagen.easymp4 import EasyMP4Tags
-from mutagen.flac import FLAC
+from mutagen.flac import FLAC, Picture
 from mutagen.id3 import (
+    APIC,
     ID3,
     TALB,
     TBPM,
@@ -264,6 +265,133 @@ class AudioTagService:
             raise
         except (MutagenError, OSError, KeyError, ValueError, TypeError) as exc:
             raise AudioTagError(f"Не удалось записать теги {path}: {exc}") from exc
+
+    def write_artwork(
+        self,
+        path: Path,
+        artwork: EmbeddedArtwork | None,
+    ) -> None:
+        """Заменяет или удаляет встроенную front-cover обложку трека.
+
+        Редактор обложек намеренно ограничен форматами, для которых DJMAKER уже
+        умеет надёжно читать embedded artwork: MP3/ID3, FLAC и M4A/MP4.
+        """
+        if artwork is not None:
+            artwork = self.prepare_artwork(artwork.data)
+
+        try:
+            audio = File(path)
+        except (MutagenError, OSError) as exc:
+            raise AudioTagError(
+                f"Не удалось открыть {path} для записи обложки: {exc}"
+            ) from exc
+
+        if audio is None:
+            raise AudioTagError(f"Формат файла не распознан: {path}")
+
+        try:
+            if isinstance(audio, MP4):
+                self._write_artwork_mp4(audio, artwork)
+            elif isinstance(audio, FLAC):
+                self._write_artwork_flac(audio, artwork)
+            elif (
+                isinstance(getattr(audio, "tags", None), ID3)
+                or path.suffix.lower() == ".mp3"
+            ):
+                self._write_artwork_id3(audio, artwork)
+            else:
+                raise UnsupportedTagWriteError(
+                    "Редактирование встроенной обложки поддерживается только "
+                    "для MP3, FLAC и M4A/MP4"
+                )
+        except UnsupportedTagWriteError:
+            raise
+        except (MutagenError, OSError, KeyError, ValueError, TypeError) as exc:
+            raise AudioTagError(
+                f"Не удалось записать обложку в {path}: {exc}"
+            ) from exc
+
+    @staticmethod
+    def prepare_artwork(
+        data: bytes,
+    ) -> EmbeddedArtwork:
+        """Проверяет выбранную JPEG/PNG-обложку и нормализует MIME type."""
+        if not data:
+            raise AudioTagError("Файл обложки пуст")
+        if len(data) > 32 * 1024 * 1024:
+            raise AudioTagError("Обложка больше 32 МБ")
+
+        detected = AudioTagService._artwork_mime_type(data)
+        if detected not in {"image/jpeg", "image/png"}:
+            raise AudioTagError("Для встроенной обложки выберите JPEG или PNG")
+        return EmbeddedArtwork(data=bytes(data), mime_type=detected)
+
+    @staticmethod
+    def _artwork_mime_type(data: bytes) -> str:
+        if data.startswith(b"\xff\xd8\xff"):
+            return "image/jpeg"
+        if data.startswith(b"\x89PNG\r\n\x1a\n"):
+            return "image/png"
+        return ""
+
+    def _write_artwork_mp4(
+        self,
+        audio: MP4,
+        artwork: EmbeddedArtwork | None,
+    ) -> None:
+        self._ensure_tags(audio)
+        tags = audio.tags
+        if tags is None:
+            raise AudioTagError("MP4-контейнер не создал таблицу тегов")
+
+        if artwork is None:
+            self._set_or_delete(tags, "covr", None)
+        else:
+            image_format = (
+                MP4Cover.FORMAT_PNG
+                if artwork.mime_type == "image/png"
+                else MP4Cover.FORMAT_JPEG
+            )
+            tags["covr"] = [MP4Cover(artwork.data, imageformat=image_format)]
+        audio.save()
+
+    @staticmethod
+    def _write_artwork_flac(
+        audio: FLAC,
+        artwork: EmbeddedArtwork | None,
+    ) -> None:
+        audio.clear_pictures()
+        if artwork is not None:
+            picture = Picture()
+            picture.type = 3
+            picture.mime = artwork.mime_type
+            picture.desc = "Cover"
+            picture.data = artwork.data
+            audio.add_picture(picture)
+        audio.save()
+
+    def _write_artwork_id3(
+        self,
+        audio: Any,
+        artwork: EmbeddedArtwork | None,
+    ) -> None:
+        self._ensure_tags(audio)
+        tags = audio.tags
+        if not isinstance(tags, ID3):
+            raise AudioTagError("Ожидались ID3-теги")
+
+        tags.delall("APIC")
+        if artwork is not None:
+            tags.add(
+                APIC(
+                    encoding=3,
+                    mime=artwork.mime_type,
+                    type=3,
+                    desc="Cover",
+                    data=artwork.data,
+                )
+            )
+        audio.save()
 
     @staticmethod
     def _ensure_tags(audio: Any) -> None:

@@ -27,6 +27,7 @@ class TaskKind(StrEnum):
 
     AUDIO_ANALYSIS = "audio_analysis"
     LIBRARY_SCAN = "library_scan"
+    LIBRARY_IMPORT = "library_import"
     ARTWORK_INDEX = "artwork_index"
     WAVEFORM_ANALYSIS = "waveform_analysis"
 

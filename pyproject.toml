@@ -11,7 +11,13 @@ requires-python = ">=3.14"
 dependencies = [
     "flet==0.86.5",
     "flet-audio==0.86.5",
+    "flet-dropzone==0.4.0",
     "mutagen==1.48.1",
+]
+
+[project.optional-dependencies]
+desktop-build = [
+    "flet-cli==0.86.5",
 ]
 
 [project.scripts]
@@ -26,6 +32,9 @@ djmaker = ["py.typed"]
 [tool.flet.app]
 path = "src"
 module = "main.py"
+[tool.flet.flutter.pubspec.dependency_overrides]
+flet = "0.86.5"
+
 [tool.flet.boot_screen.flet]
 theme_mode = "auto"
 

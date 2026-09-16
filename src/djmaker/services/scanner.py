@@ -13,44 +13,15 @@ from djmaker.domain.models import EmbeddedArtwork, InspectedAudio, ScanStats
 from djmaker.infrastructure.database import LibraryDatabase
 from djmaker.services.artwork import ArtworkCache, ArtworkCacheError
 from djmaker.services.audio_tags import AudioTagError, AudioTagService
+from djmaker.services.drop_import import (
+    AUDIO_EXTENSIONS,
+    DropImportPlan,
+    plan_drop_import,
+)
 from djmaker.services.tasks import TaskControl
 
 
 LOGGER = logging.getLogger(__name__)
-
-# Mutagen умеет читать больше форматов, чем базовый набор DJMAKER. Здесь перечислены
-# расширения, которые имеет смысл считать музыкальными при обходе файловой системы.
-AUDIO_EXTENSIONS = frozenset(
-    {
-        ".aac",
-        ".ac3",
-        ".aif",
-        ".aiff",
-        ".ape",
-        ".asf",
-        ".dff",
-        ".dsf",
-        ".flac",
-        ".m4a",
-        ".m4b",
-        ".mp3",
-        ".mp4",
-        ".mpc",
-        ".mpp",
-        ".ofr",
-        ".ofs",
-        ".oga",
-        ".ogg",
-        ".opus",
-        ".spx",
-        ".tak",
-        ".tta",
-        ".wav",
-        ".wave",
-        ".wma",
-        ".wv",
-    }
-)
 
 
 class ScanError(RuntimeError):
@@ -100,6 +71,7 @@ class LibraryScanner:
             for filename in filenames:
                 path = directory_path / filename
                 if path.suffix.lower() not in AUDIO_EXTENSIONS:
+                    stats.ignored += 1
                     continue
                 if task is not None:
                     task.checkpoint()
@@ -122,6 +94,83 @@ class LibraryScanner:
 
         self.database.set_root_scanned(root)
         return stats
+
+    def scan_paths(
+        self,
+        paths: tuple[Path, ...] | list[Path],
+        *,
+        task: TaskControl | None = None,
+        progress: Callable[[ScanStats, Path], None] | None = None,
+    ) -> ScanStats:
+        """Импортирует набор dropped-файлов/папок, фильтруя лишнее."""
+        plan = plan_drop_import(paths)
+        stats = ScanStats(ignored=plan.ignored_count)
+
+        for directory in plan.directories:
+            if task is not None:
+                task.checkpoint()
+            baseline = ScanStats(
+                discovered=stats.discovered,
+                updated=stats.updated,
+                unchanged=stats.unchanged,
+                errors=stats.errors,
+                removed=stats.removed,
+                ignored=stats.ignored,
+            )
+
+            def directory_progress(
+                local_stats: ScanStats,
+                current_path: Path,
+                *,
+                base: ScanStats = baseline,
+            ) -> None:
+                if progress is None:
+                    return
+                progress(self._combined_stats(base, local_stats), current_path)
+
+            local = self.scan(
+                directory,
+                task=task,
+                progress=directory_progress,
+            )
+            stats = self._combined_stats(stats, local)
+
+        roots = self.database.list_roots()
+        for path in plan.files:
+            if task is not None:
+                task.checkpoint()
+            stats.discovered += 1
+            token = uuid.uuid4().hex
+            root = self._root_for_file(path, roots)
+            self._scan_file(root, path, token, stats, task=task)
+            if progress is not None:
+                progress(stats, path)
+
+        return stats
+
+    @staticmethod
+    def plan_paths(paths: tuple[Path, ...] | list[Path]) -> DropImportPlan:
+        """Возвращает план Drag&Drop без запуска индексации."""
+        return plan_drop_import(paths)
+
+    @staticmethod
+    def _root_for_file(path: Path, roots: list[Path]) -> Path:
+        """Сохраняет существующий library root при импорте одиночного файла."""
+        matches = [root for root in roots if path.is_relative_to(root)]
+        if not matches:
+            return path.parent
+        return max(matches, key=lambda root: len(root.parts))
+
+    @staticmethod
+    def _combined_stats(left: ScanStats, right: ScanStats) -> ScanStats:
+        return ScanStats(
+            discovered=left.discovered + right.discovered,
+            updated=left.updated + right.updated,
+            unchanged=left.unchanged + right.unchanged,
+            errors=left.errors + right.errors,
+            removed=left.removed + right.removed,
+            ignored=left.ignored + right.ignored,
+        )
 
     def inspect_and_hash(
         self,

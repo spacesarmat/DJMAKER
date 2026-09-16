@@ -4,14 +4,25 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import flet as ft
 import flet_audio as fta
 
+try:
+    import flet_dropzone as ftd
+except ImportError:  # pragma: no cover - зависит от desktop extension runtime
+    ftd = None
+
 from djmaker.config import DEFAULT_ORGANIZE_TEMPLATE, DEFAULT_TARGET_LUFS, AppPaths
-from djmaker.domain.models import AudioMetadata, MetadataCandidate, TrackRecord
+from djmaker.domain.models import (
+    AudioMetadata,
+    EmbeddedArtwork,
+    MetadataCandidate,
+    TrackRecord,
+)
 from djmaker.plugins.base import MetadataProviderError
 from djmaker.runtime.dependencies import (
     DependencyStatus,
@@ -103,6 +114,12 @@ class _WaveformView:
     played_bars: int
 
 
+@dataclass(slots=True)
+class _TagEditorArtworkState:
+    changed: bool = False
+    artwork: EmbeddedArtwork | None = None
+
+
 class DJMakerUI:
     """Связывает Flet-контролы с сервисным слоем приложения."""
 
@@ -128,6 +145,7 @@ class DJMakerUI:
         self.runtime_report = runtime.probe()
         self._audio_task_contexts: dict[str, _AudioTaskContext] = {}
         self._scan_task_paths: dict[str, Path] = {}
+        self._drop_task_paths: dict[str, tuple[Path, ...]] = {}
         self._artwork_task_contexts: dict[str, _BatchTaskContext] = {}
         self._waveform_task_contexts: dict[str, _WaveformTaskContext] = {}
         self._waveform_views: dict[int, _WaveformView] = {}
@@ -242,6 +260,7 @@ class DJMakerUI:
             on_click=self._cycle_theme_mode,
         )
         self.navigation = self._build_navigation()
+        self._drop_overlay = self._build_drop_overlay()
 
     def build(self) -> None:
         """Строит главное окно приложения."""
@@ -285,18 +304,95 @@ class DJMakerUI:
             expand=True,
         )
 
-        self.page.add(
-            ft.Row(
-                controls=[
-                    self.navigation,
-                    ft.VerticalDivider(width=1, color=ft.Colors.OUTLINE_VARIANT),
-                    workspace,
-                ],
-                spacing=0,
-                expand=True,
-            )
+        main_row = ft.Row(
+            controls=[
+                self.navigation,
+                ft.VerticalDivider(width=1, color=ft.Colors.OUTLINE_VARIANT),
+                workspace,
+            ],
+            spacing=0,
+            expand=True,
         )
+        root_content = ft.Stack(
+            controls=[main_row, self._drop_overlay],
+            expand=True,
+        )
+        if self._native_drop_enabled():
+            dropzone = ftd.Dropzone(
+                content=root_content,
+                expand=True,
+                on_dropped=self._on_paths_dropped,
+                on_entered=self._on_drop_entered,
+                on_exited=self._on_drop_exited,
+            )
+            self.page.add(dropzone)
+        else:
+            self.page.add(root_content)
         self.show_library()
+
+    @staticmethod
+    def _native_drop_enabled() -> bool:
+        """Проверяет, запущен ли desktop runtime с собранными extensions."""
+        return ftd is not None and bool(os.getenv("FLET_DART_BRIDGE_PORT"))
+
+    def _build_drop_overlay(self) -> ft.Container:
+        """Создаёт полнооконный индикатор активного Drag&Drop."""
+        return ft.Container(
+            visible=False,
+            left=0,
+            right=0,
+            top=0,
+            bottom=0,
+            opacity=0.96,
+            bgcolor=ft.Colors.SURFACE_CONTAINER_HIGHEST,
+            alignment=ft.Alignment.CENTER,
+            content=ft.Column(
+                controls=[
+                    ft.Icon(
+                        ft.Icons.DRIVE_FOLDER_UPLOAD,
+                        size=52,
+                        color=ft.Colors.PRIMARY,
+                    ),
+                    ft.Text(
+                        "Отпустите файлы или папки",
+                        size=COMPACT_UI.font_lg,
+                        weight=ft.FontWeight.BOLD,
+                    ),
+                    ft.Text(
+                        "Поддерживаемое аудио будет добавлено, остальные файлы пропущены",
+                        size=COMPACT_UI.font_sm,
+                        color=ft.Colors.ON_SURFACE_VARIANT,
+                    ),
+                ],
+                spacing=COMPACT_UI.space_sm,
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                tight=True,
+            ),
+        )
+
+    def _on_drop_entered(self, _: object) -> None:
+        self._drop_overlay.visible = True
+        self._drop_overlay.update()
+
+    def _on_drop_exited(self, _: object) -> None:
+        self._drop_overlay.visible = False
+        self._drop_overlay.update()
+
+    def _on_paths_dropped(self, event: object) -> None:
+        """Передаёт реальные desktop paths в управляемую задачу импорта."""
+        self._drop_overlay.visible = False
+        self._drop_overlay.update()
+
+        files = getattr(event, "files", ()) or ()
+        paths = tuple(
+            Path(path)
+            for item in files
+            if (path := str(getattr(item, "path", "") or "").strip())
+        )
+        if not paths:
+            self._notify("Drag&Drop: не получено локальных файлов или папок")
+            return
+        self.page.run_task(self._run_drop_import, paths)
 
     def _build_player_bar(self) -> ft.Container:
         """Создаёт компактный постоянный плеер прослушивания."""
@@ -914,7 +1010,7 @@ class DJMakerUI:
                 self._empty_state(
                     ft.Icons.TASK_ALT,
                     "Фоновых задач пока нет",
-                    "Сканирование, обложки, waveform и BPM / Key появятся здесь.",
+                    "Сканирование, Drag&Drop, обложки, waveform и BPM / Key появятся здесь.",
                 )
             )
         else:
@@ -1071,6 +1167,15 @@ class DJMakerUI:
             self.page.run_task(self._run_audio_analysis, task_id)
         elif snapshot.kind is TaskKind.LIBRARY_SCAN and task_id in self._scan_task_paths:
             self.page.run_task(self._run_scan, self._scan_task_paths[task_id], task_id)
+        elif (
+            snapshot.kind is TaskKind.LIBRARY_IMPORT
+            and task_id in self._drop_task_paths
+        ):
+            self.page.run_task(
+                self._run_drop_import,
+                self._drop_task_paths[task_id],
+                task_id,
+            )
         elif snapshot.kind is TaskKind.ARTWORK_INDEX and task_id in self._artwork_task_contexts:
             self.page.run_task(self._run_embedded_artwork, task_id)
         elif (
@@ -1087,6 +1192,7 @@ class DJMakerUI:
     def _forget_task_context(self, task_id: str) -> None:
         self._audio_task_contexts.pop(task_id, None)
         self._scan_task_paths.pop(task_id, None)
+        self._drop_task_paths.pop(task_id, None)
         self._artwork_task_contexts.pop(task_id, None)
         self._waveform_task_contexts.pop(task_id, None)
 
@@ -1402,6 +1508,9 @@ class DJMakerUI:
                 on_tap=lambda _, track_id=track.id: self.page.run_task(
                     self._select_library_track, track_id
                 ),
+                on_double_tap=lambda _, track_id=track.id: self._open_tag_editor(
+                    track_id
+                ),
                 mouse_cursor=ft.MouseCursor.CLICK,
             ),
         )
@@ -1414,6 +1523,7 @@ class DJMakerUI:
                 ft.Text(
                     f"{artist} - {title}",
                     expand=True,
+                    expand_loose=True,
                     weight=ft.FontWeight.BOLD,
                     size=COMPACT_UI.font_sm,
                     max_lines=1,
@@ -1710,6 +1820,15 @@ class DJMakerUI:
             self._notify(str(exc))
             return
 
+        drop_message = (
+            "Перетащите в окно DJMAKER файлы или папки — неподдерживаемое "
+            "будет отфильтровано автоматически."
+            if self._native_drop_enabled()
+            else (
+                "Native Drag&Drop доступен в desktop debug/build. "
+                "Обычный python -m djmaker продолжает работать без extension."
+            )
+        )
         controls: list[ft.Control] = [
             ft.Row(
                 controls=[
@@ -1721,7 +1840,25 @@ class DJMakerUI:
                     ),
                 ],
                 alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-            )
+            ),
+            self._surface_card(
+                ft.Row(
+                    controls=[
+                        ft.Icon(
+                            ft.Icons.DRIVE_FOLDER_UPLOAD,
+                            color=ft.Colors.PRIMARY,
+                            size=COMPACT_UI.action_icon_size,
+                        ),
+                        ft.Text(
+                            drop_message,
+                            size=COMPACT_UI.font_xs,
+                            color=ft.Colors.ON_SURFACE_VARIANT,
+                            expand=True,
+                        ),
+                    ],
+                    spacing=COMPACT_UI.space_sm,
+                )
+            ),
         ]
         if not roots:
             controls.append(
@@ -1840,9 +1977,122 @@ class DJMakerUI:
                 "Сканирование завершено: "
                 f"найдено {stats.discovered}, обновлено {stats.updated}, "
                 f"без изменений {stats.unchanged}, удалено {stats.removed}, "
-                f"ошибок {stats.errors}"
+                f"пропущено {stats.ignored}, ошибок {stats.errors}"
             )
             if self.navigation.selected_index == 1:
+                self.show_folders()
+            if self.tasks.active_for_kind(TaskKind.WAVEFORM_ANALYSIS) is None:
+                self.page.run_task(self.ensure_waveforms)
+        finally:
+            self._refresh_task_indicator()
+            self.page.update()
+
+    async def _run_drop_import(
+        self,
+        paths: tuple[Path, ...],
+        task_id: str | None = None,
+    ) -> None:
+        """Импортирует dropped-файлы/папки через общий scanner/task pipeline."""
+        task: ManagedTask
+        if task_id is None:
+            if (
+                self.tasks.active_for_kind(TaskKind.LIBRARY_SCAN) is not None
+                or self.tasks.active_for_kind(TaskKind.LIBRARY_IMPORT) is not None
+            ):
+                self._notify(
+                    "Drag&Drop: дождитесь завершения текущего сканирования "
+                    "или остановите его в «Задачах»"
+                )
+                return
+
+            plan = self.service.plan_import_paths(list(paths))
+            if plan.accepted_count == 0:
+                self._notify(
+                    "Drag&Drop: поддерживаемых аудиофайлов или папок не найдено "
+                    f"· пропущено: {plan.ignored_count}"
+                )
+                return
+
+            task = self.tasks.create(
+                kind=TaskKind.LIBRARY_IMPORT,
+                title="Drag&Drop импорт",
+                detail=(
+                    f"папок: {len(plan.directories)} · файлов: {len(plan.files)} "
+                    f"· сразу пропущено: {plan.ignored_count}"
+                ),
+            )
+            task_id = task.id
+            self._drop_task_paths[task_id] = tuple(paths)
+        else:
+            task = self.tasks.get(task_id)  # type: ignore[assignment]
+            if task is None:
+                return
+
+        self._refresh_task_indicator()
+        self.status.value = "Drag&Drop: импорт файлов и папок"
+        self.page.update()
+
+        def update_progress(stats: object, current_path: Path) -> None:
+            discovered = int(getattr(stats, "discovered", 0))
+            updated = int(getattr(stats, "updated", 0))
+            unchanged = int(getattr(stats, "unchanged", 0))
+            errors = int(getattr(stats, "errors", 0))
+            ignored = int(getattr(stats, "ignored", 0))
+            task.set_progress(
+                completed=updated + unchanged + errors + ignored,
+                succeeded=updated + unchanged,
+                failed=errors,
+                detail=(
+                    f"{current_path.name} · аудио: {discovered} "
+                    f"· пропущено: {ignored}"
+                ),
+            )
+
+        try:
+            stats = await self.workers.run(
+                self.service.import_paths,
+                list(paths),
+                task=task,
+                progress=update_progress,
+            )
+        except TaskPaused:
+            task.mark_paused("Остановлено · можно продолжить")
+            self._notify("Drag&Drop импорт остановлен")
+        except TaskCancelled:
+            task.mark_cancelled()
+            self._forget_task_context(task_id)
+            self._notify("Drag&Drop импорт отменён")
+        except Exception as exc:
+            LOGGER.exception("Ошибка Drag&Drop импорта")
+            task.mark_failed(exc)
+            self._forget_task_context(task_id)
+            self._notify(f"Ошибка Drag&Drop импорта: {exc}")
+        else:
+            task.set_progress(
+                completed=(
+                    stats.updated
+                    + stats.unchanged
+                    + stats.errors
+                    + stats.ignored
+                ),
+                succeeded=stats.updated + stats.unchanged,
+                failed=stats.errors,
+                detail=(
+                    f"Завершено · аудио: {stats.discovered} "
+                    f"· пропущено: {stats.ignored}"
+                ),
+            )
+            task.mark_completed()
+            self._forget_task_context(task_id)
+            self._notify(
+                "Drag&Drop завершён: "
+                f"аудио {stats.discovered}, обновлено {stats.updated}, "
+                f"без изменений {stats.unchanged}, пропущено {stats.ignored}, "
+                f"ошибок {stats.errors}"
+            )
+            if self.navigation.selected_index == 0:
+                self.show_library()
+            elif self.navigation.selected_index == 1:
                 self.show_folders()
             if self.tasks.active_for_kind(TaskKind.WAVEFORM_ANALYSIS) is None:
                 self.page.run_task(self.ensure_waveforms)
@@ -3109,17 +3359,224 @@ class DJMakerUI:
         if track is None:
             self._notify("Трек не найден")
             return
+
         metadata = track.metadata
-        title = ft.TextField(label="Title", dense=True, text_size=COMPACT_UI.font_sm, value=metadata.title)
-        artist = ft.TextField(label="Artist", dense=True, text_size=COMPACT_UI.font_sm, value=metadata.artist)
-        album = ft.TextField(label="Album", dense=True, text_size=COMPACT_UI.font_sm, value=metadata.album)
-        album_artist = ft.TextField(label="Album Artist", dense=True, text_size=COMPACT_UI.font_sm, value=metadata.album_artist)
-        genre = ft.TextField(label="Genre", dense=True, text_size=COMPACT_UI.font_sm, value=metadata.genre)
-        year = ft.TextField(label="Year", dense=True, text_size=COMPACT_UI.font_sm, value=metadata.year)
-        track_no = ft.TextField(label="Track", dense=True, text_size=COMPACT_UI.font_sm, value=str(metadata.track_number or ""))
-        disc_no = ft.TextField(label="Disc", dense=True, text_size=COMPACT_UI.font_sm, value=str(metadata.disc_number or ""))
-        bpm = ft.TextField(label="BPM", dense=True, text_size=COMPACT_UI.font_sm, value=str(metadata.bpm or ""))
-        musical_key = ft.TextField(label="Key", dense=True, text_size=COMPACT_UI.font_sm, value=metadata.musical_key)
+        title = ft.TextField(
+            label="Название",
+            dense=True,
+            text_size=COMPACT_UI.font_sm,
+            value=metadata.title,
+            expand=True,
+        )
+        artist = ft.TextField(
+            label="Исполнитель",
+            dense=True,
+            text_size=COMPACT_UI.font_sm,
+            value=metadata.artist,
+            expand=True,
+        )
+        album = ft.TextField(
+            label="Альбом",
+            dense=True,
+            text_size=COMPACT_UI.font_sm,
+            value=metadata.album,
+            expand=True,
+        )
+        album_artist = ft.TextField(
+            label="Исполнитель альбома",
+            dense=True,
+            text_size=COMPACT_UI.font_sm,
+            value=metadata.album_artist,
+            expand=True,
+        )
+        genre = ft.TextField(
+            label="Жанр",
+            dense=True,
+            text_size=COMPACT_UI.font_sm,
+            value=metadata.genre,
+            expand=True,
+        )
+        year = ft.TextField(
+            label="Год",
+            dense=True,
+            text_size=COMPACT_UI.font_sm,
+            value=metadata.year,
+            width=110,
+        )
+        track_no = ft.TextField(
+            label="Трек",
+            dense=True,
+            text_size=COMPACT_UI.font_sm,
+            value=str(metadata.track_number or ""),
+            width=90,
+        )
+        disc_no = ft.TextField(
+            label="Диск",
+            dense=True,
+            text_size=COMPACT_UI.font_sm,
+            value=str(metadata.disc_number or ""),
+            width=90,
+        )
+        bpm = ft.TextField(
+            label="BPM (тег)",
+            dense=True,
+            text_size=COMPACT_UI.font_sm,
+            value=str(metadata.bpm or ""),
+            width=120,
+        )
+        musical_key = ft.TextField(
+            label="Key (тег)",
+            dense=True,
+            text_size=COMPACT_UI.font_sm,
+            value=metadata.musical_key,
+            width=150,
+        )
+
+        artwork_state = _TagEditorArtworkState()
+        artwork_supported = track.path.suffix.lower() in {
+            ".mp3",
+            ".flac",
+            ".m4a",
+            ".m4b",
+            ".mp4",
+        }
+        artwork_box = ft.Container(
+            width=116,
+            height=116,
+            border_radius=COMPACT_UI.radius,
+            bgcolor=ft.Colors.SURFACE_CONTAINER_HIGHEST,
+            alignment=ft.Alignment.CENTER,
+        )
+        artwork_status = ft.Text(
+            "Встроенная обложка",
+            size=COMPACT_UI.font_xs,
+            color=ft.Colors.ON_SURFACE_VARIANT,
+            max_lines=2,
+        )
+        remove_artwork_button = ft.Button(
+            content="Удалить",
+            icon=ft.Icons.DELETE_OUTLINE,
+            disabled=(
+                not artwork_supported
+                or track.embedded_artwork_path is None
+                or not track.embedded_artwork_path.is_file()
+            ),
+        )
+
+        def set_artwork_preview(source: str | bytes | None) -> None:
+            if source is None:
+                artwork_box.content = ft.Icon(
+                    ft.Icons.IMAGE_OUTLINED,
+                    size=32,
+                    color=ft.Colors.ON_SURFACE_VARIANT,
+                )
+                return
+            artwork_box.content = ft.Image(
+                src=source,
+                width=116,
+                height=116,
+                fit=ft.BoxFit.COVER,
+                border_radius=COMPACT_UI.radius,
+                cache_width=232,
+                cache_height=232,
+                semantics_label="Встроенная обложка",
+            )
+
+        embedded = track.embedded_artwork_path
+        if embedded is not None and embedded.is_file():
+            set_artwork_preview(str(embedded))
+        else:
+            set_artwork_preview(None)
+            artwork_status.value = "Встроенной обложки нет"
+
+        async def choose_artwork(_: object) -> None:
+            try:
+                selected = await ft.FilePicker().pick_files(
+                    dialog_title="Выберите обложку",
+                    file_type=ft.FilePickerFileType.CUSTOM,
+                    allowed_extensions=["jpg", "jpeg", "png"],
+                    allow_multiple=False,
+                    with_data=True,
+                )
+            except Exception as exc:
+                LOGGER.exception("Ошибка выбора обложки")
+                self._notify(f"Не удалось выбрать обложку: {exc}")
+                return
+            if not selected:
+                return
+
+            picked = selected[0]
+            data = picked.bytes
+            if data is None and picked.path:
+                try:
+                    data = await self.workers.run(Path(picked.path).read_bytes)
+                except OSError as exc:
+                    self._notify(f"Не удалось прочитать обложку: {exc}")
+                    return
+            if not data:
+                self._notify("Не удалось получить данные обложки")
+                return
+
+            try:
+                prepared = self.service.prepare_artwork(data)
+            except RuntimeError as exc:
+                self._notify(str(exc))
+                return
+
+            artwork_state.changed = True
+            artwork_state.artwork = prepared
+            set_artwork_preview(prepared.data)
+            artwork_status.value = f"Будет записана: {picked.name}"
+            remove_artwork_button.disabled = False
+            self.page.update(
+                artwork_box,
+                artwork_status,
+                remove_artwork_button,
+            )
+
+        def remove_artwork(_: object) -> None:
+            artwork_state.changed = True
+            artwork_state.artwork = None
+            set_artwork_preview(None)
+            artwork_status.value = "Встроенная обложка будет удалена"
+            remove_artwork_button.disabled = True
+            self.page.update(
+                artwork_box,
+                artwork_status,
+                remove_artwork_button,
+            )
+
+        remove_artwork_button.on_click = remove_artwork
+        choose_artwork_button = ft.Button(
+            content="Заменить",
+            icon=ft.Icons.PHOTO_LIBRARY_OUTLINED,
+            disabled=not artwork_supported,
+            on_click=choose_artwork,
+        )
+
+        analysis_parts: list[str] = []
+        if track.analysis is not None:
+            if track.analysis.bpm is not None:
+                analysis_parts.append(f"{track.analysis.bpm:.1f} BPM")
+            key = " ".join(
+                part
+                for part in (
+                    track.analysis.musical_key,
+                    track.analysis.scale,
+                )
+                if part
+            )
+            if key:
+                analysis_parts.append(key)
+            if track.analysis.camelot:
+                analysis_parts.append(track.analysis.camelot)
+        analysis_label = " · ".join(analysis_parts) or "нет"
+        technical_label = " · ".join(
+            (
+                self._format_duration(track.technical.duration),
+                *self._track_detail_tags(track),
+            )
+        )
 
         async def save(_: object) -> None:
             try:
@@ -3138,39 +3595,114 @@ class DJMakerUI:
             except ValueError as exc:
                 self._notify(str(exc))
                 return
+
             self._set_busy(True, "Сохранение тегов...")
             try:
-                await self.workers.run(self.service.update_tags, track_id, new_metadata)
+                await self.workers.run(
+                    self.service.update_tags,
+                    track_id,
+                    new_metadata,
+                    replace_artwork=artwork_state.changed,
+                    artwork=artwork_state.artwork,
+                )
             except Exception as exc:
                 LOGGER.exception("Ошибка сохранения тегов")
                 self._notify(f"Не удалось сохранить теги: {exc}")
             else:
                 self.page.pop_dialog()
                 self._notify("Теги сохранены")
+                self._selected_track_id = track_id
                 self.show_library()
+                self.page.run_task(self._select_library_track, track_id)
             finally:
                 self._set_busy(False)
+
+        artwork_controls: list[ft.Control] = [
+            ft.Text(
+                "Встроенная обложка",
+                weight=ft.FontWeight.BOLD,
+                size=COMPACT_UI.font_sm,
+            ),
+            artwork_box,
+            artwork_status,
+            choose_artwork_button,
+            remove_artwork_button,
+        ]
+        if not artwork_supported:
+            artwork_controls.append(
+                ft.Text(
+                    "Запись обложки доступна для MP3, FLAC и M4A/MP4.",
+                    size=COMPACT_UI.font_micro,
+                    color=ft.Colors.ON_SURFACE_VARIANT,
+                )
+            )
+
+        fields = ft.Column(
+            controls=[
+                ft.Row(controls=[artist, title], spacing=COMPACT_UI.space_sm),
+                ft.Row(
+                    controls=[album_artist, album],
+                    spacing=COMPACT_UI.space_sm,
+                ),
+                ft.Row(
+                    controls=[genre, year, track_no, disc_no],
+                    spacing=COMPACT_UI.space_sm,
+                ),
+                ft.Row(
+                    controls=[bpm, musical_key],
+                    spacing=COMPACT_UI.space_sm,
+                ),
+                ft.Text(
+                    f"DSP-анализ: {analysis_label}",
+                    size=COMPACT_UI.font_xs,
+                    color=ft.Colors.ON_SURFACE_VARIANT,
+                ),
+                ft.Text(
+                    technical_label,
+                    size=COMPACT_UI.font_xs,
+                    color=ft.Colors.ON_SURFACE_VARIANT,
+                ),
+                ft.Text(
+                    str(track.path),
+                    size=COMPACT_UI.font_micro,
+                    color=ft.Colors.ON_SURFACE_VARIANT,
+                    max_lines=2,
+                    overflow=ft.TextOverflow.ELLIPSIS,
+                ),
+            ],
+            expand=True,
+            spacing=COMPACT_UI.space_sm,
+        )
 
         dialog = ft.AlertDialog(
             modal=True,
             title=ft.Text(track.path.name),
-            content=ft.Column(
-                controls=[
-                    title,
-                    artist,
-                    album,
-                    album_artist,
-                    genre,
-                    year,
-                    ft.Row(controls=[track_no, disc_no]),
-                    ft.Row(controls=[bpm, musical_key]),
-                ],
-                tight=True,
-                scroll=ft.ScrollMode.AUTO,
+            content=ft.Container(
+                width=760,
+                content=ft.Row(
+                    controls=[
+                        ft.Column(
+                            controls=artwork_controls,
+                            width=150,
+                            spacing=COMPACT_UI.space_sm,
+                            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                        ),
+                        fields,
+                    ],
+                    spacing=COMPACT_UI.space_md,
+                    vertical_alignment=ft.CrossAxisAlignment.START,
+                ),
             ),
             actions=[
-                ft.Button(content="Отмена", on_click=lambda _: self.page.pop_dialog()),
-                ft.Button(content="Сохранить", icon=ft.Icons.SAVE_OUTLINED, on_click=save),
+                ft.Button(
+                    content="Отмена",
+                    on_click=lambda _: self.page.pop_dialog(),
+                ),
+                ft.Button(
+                    content="Сохранить",
+                    icon=ft.Icons.SAVE_OUTLINED,
+                    on_click=save,
+                ),
             ],
         )
         self.page.show_dialog(dialog)

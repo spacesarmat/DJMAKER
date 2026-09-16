@@ -108,6 +108,7 @@ class ScanStats:
     unchanged: int = 0
     errors: int = 0
     removed: int = 0
+    ignored: int = 0
 
 
 @dataclass(slots=True)

@@ -18,6 +18,12 @@ class TrackRowUITests(unittest.TestCase):
         self.assertIn('f"{artist} - {title}"', source)
         self.assertIn("self._track_key_label(track), accent=True", source)
         self.assertIn("self._track_bpm_label(track), accent=True", source)
+        self.assertIn(
+            'f"{artist} - {title}",\n'
+            "                    expand=True,\n"
+            "                    expand_loose=True,",
+            source,
+        )
 
     def test_second_line_uses_duration_technical_tags_and_album(self) -> None:
         source = UI_SOURCE.read_text(encoding="utf-8")
@@ -32,7 +38,6 @@ class TrackRowUITests(unittest.TestCase):
         )
         self.assertIn('tags.append(f"{round(technical.bitrate / 1000)} kbps")', source)
         self.assertIn('tags.append(f"{technical.sample_rate / 1000:g} kHz")', source)
-
 
     def test_track_tags_highlight_on_hover(self) -> None:
         source = UI_SOURCE.read_text(encoding="utf-8")
