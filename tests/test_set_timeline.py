@@ -12,9 +12,12 @@ from pathlib import Path
 from djmaker.domain.models import AudioMetadata, AudioTechnicalInfo
 from djmaker.domain.set_timeline import (
     SetTimelineError,
+    TimelineTransition,
     build_transition_plan,
+    build_playlist_timeline,
     move_by_beats,
     snap_to_beat,
+    snap_to_square,
 )
 from djmaker.infrastructure.database import LibraryDatabase
 from djmaker.infrastructure.playlists import PlaylistRepository
@@ -34,6 +37,7 @@ class SetTimelineDomainTests(unittest.TestCase):
         self.assertEqual(snap_to_beat(1_220, 120, anchor_ms=250), 1_250)
         self.assertEqual(move_by_beats(1_250, 4, 120), 3_250)
         self.assertEqual(move_by_beats(250, -4, 120), 0)
+        self.assertEqual(snap_to_square(17_900, 120, 8, anchor_ms=250), 16_250)
 
     def test_plan_uses_square_and_syncs_incoming_bpm(self) -> None:
         plan = build_transition_plan(
@@ -67,6 +71,19 @@ class SetTimelineDomainTests(unittest.TestCase):
         arguments["incoming_bpm"] = None
         with self.assertRaises(SetTimelineError):
             build_transition_plan(**arguments)
+
+    def test_playlist_timeline_alternates_lanes_and_aligns_cues(self) -> None:
+        transitions = [
+            TimelineTransition(1, 2, 40_000, 5_000, 16_000),
+            TimelineTransition(2, 3, 45_000, 10_000, 16_000),
+        ]
+        layout = build_playlist_timeline(
+            [(1, 60_000), (2, 70_000), (3, 80_000)], transitions
+        )
+        self.assertEqual([item.lane for item in layout.clips], [0, 1, 0])
+        self.assertEqual([item.start_ms for item in layout.clips], [0, 35_000, 70_000])
+        self.assertEqual(layout.transition_positions_ms, (40_000, 80_000))
+        self.assertEqual(layout.duration_ms, 150_000)
 
 
 class SetTimelineRepositoryTests(unittest.TestCase):
@@ -119,6 +136,9 @@ class SetTimelineRepositoryTests(unittest.TestCase):
             [(item.slot, item.position_ms) for item in self.repository.cue_points(self.track_ids[0])],
             [(1, 2_500), (3, 9_000)],
         )
+        batch = self.repository.cue_points_for_tracks(self.track_ids[:2])
+        self.assertEqual([item.slot for item in batch[self.track_ids[0]]], [1, 3])
+        self.assertEqual(batch[self.track_ids[1]], [])
 
     def test_transition_round_trip_and_membership_validation(self) -> None:
         transition = self.transition()
@@ -129,6 +149,7 @@ class SetTimelineRepositoryTests(unittest.TestCase):
             ),
             transition,
         )
+        self.assertEqual(self.repository.transitions(self.playlist_id), [transition])
         invalid = SavedTransition(
             playlist_id=self.playlist_id,
             outgoing_track_id=self.track_ids[0],

@@ -18,9 +18,12 @@ from djmaker.domain.set_timeline import (
     ALLOWED_BARS_PER_SQUARE,
     ALLOWED_SQUARE_COUNTS,
     SetTimelineError,
+    TimelineTransition,
+    build_playlist_timeline,
     build_transition_plan,
     move_by_beats,
     snap_to_beat,
+    snap_to_square,
 )
 from djmaker.infrastructure.playlists import Playlist, PlaylistError
 from djmaker.infrastructure.set_timeline import (
@@ -788,8 +791,614 @@ class PlaylistUI:
             mouse_cursor=ft.MouseCursor.CLICK,
         )
 
-    def _open_transition_editor(self, pair_index: int = 0) -> None:
-        """Открывает монтаж соседней пары треков на общей музыкальной сетке."""
+    @staticmethod
+    def _arrangement_waveform_svg(
+        peaks: tuple[float, ...],
+        *,
+        width: float,
+        height: float,
+        duration_ms: int,
+        bpm: float | None,
+        anchor_ms: int,
+        bars_per_square: int,
+        cue_points: dict[int, int],
+    ) -> str:
+        """Рисует waveform, такты, квадраты и Cue одним лёгким SVG."""
+        safe_width = max(1, round(width))
+        safe_height = max(1, round(height))
+        center = safe_height / 2
+        values = peaks or (0.06,) * COMPACT_UI.waveform_bar_count
+        step = safe_width / max(1, len(values))
+        elements = [
+            f'<rect width="{safe_width}" height="{safe_height}" fill="#10141A"/>',
+            f'<line x1="0" y1="{center:.1f}" x2="{safe_width}" '
+            f'y2="{center:.1f}" stroke="#52606D" stroke-width="1"/>',
+        ]
+        if bpm is not None and duration_ms > 0:
+            beat_ms = 60_000 / bpm
+            bar_ms = beat_ms * 4
+            first_bar = int(-anchor_ms // bar_ms) - 1
+            last_bar = int((duration_ms - anchor_ms) // bar_ms) + 1
+            for bar_index in range(first_bar, last_bar + 1):
+                position = anchor_ms + bar_index * bar_ms
+                if not 0 <= position <= duration_ms:
+                    continue
+                x = position / duration_ms * safe_width
+                square_line = bar_index % bars_per_square == 0
+                color = "#D6E4F0" if square_line else "#344454"
+                opacity = "0.72" if square_line else "0.45"
+                line_width = 2 if square_line else 1
+                elements.append(
+                    f'<line x1="{x:.1f}" y1="0" x2="{x:.1f}" '
+                    f'y2="{safe_height}" stroke="{color}" '
+                    f'stroke-opacity="{opacity}" stroke-width="{line_width}"/>'
+                )
+        bar_width = max(1.0, step * 0.72)
+        for index, peak in enumerate(values):
+            normalized = min(1.0, max(0.03, float(peak)))
+            amplitude = normalized * (center - 3)
+            x = index * step
+            elements.append(
+                f'<rect x="{x:.1f}" y="{center - amplitude:.1f}" '
+                f'width="{bar_width:.1f}" height="{amplitude:.1f}" '
+                'rx="1" fill="#FFB300"/>'
+            )
+            elements.append(
+                f'<rect x="{x:.1f}" y="{center:.1f}" '
+                f'width="{bar_width:.1f}" height="{amplitude:.1f}" '
+                'rx="1" fill="#42A5F5"/>'
+            )
+        cue_colors = ("#00F0FF", "#FF4D8D", "#7CFF6B", "#FFD54F")
+        for slot, position in cue_points.items():
+            if not 0 <= position <= duration_ms:
+                continue
+            x = position / duration_ms * safe_width
+            color = cue_colors[(slot - 1) % len(cue_colors)]
+            elements.append(
+                f'<line x1="{x:.1f}" y1="0" x2="{x:.1f}" '
+                f'y2="{safe_height}" stroke="{color}" stroke-width="2"/>'
+            )
+            elements.append(
+                f'<polygon points="{x - 5:.1f},0 {x + 5:.1f},0 {x:.1f},8" '
+                f'fill="{color}"/>'
+            )
+        return (
+            f'<svg xmlns="http://www.w3.org/2000/svg" width="{safe_width}" '
+            f'height="{safe_height}" viewBox="0 0 {safe_width} {safe_height}">'
+            f'{"".join(elements)}</svg>'
+        )
+
+    @staticmethod
+    def _arrangement_fade_svg(width: float, height: float) -> str:
+        safe_width = max(1, round(width))
+        safe_height = max(1, round(height))
+        return (
+            f'<svg xmlns="http://www.w3.org/2000/svg" width="{safe_width}" '
+            f'height="{safe_height}" viewBox="0 0 {safe_width} {safe_height}">'
+            '<rect width="100%" height="100%" fill="#00F0FF" fill-opacity="0.08"/>'
+            f'<path d="M0 2 L{safe_width} {safe_height - 2}" '
+            'stroke="#FFB300" stroke-width="2" fill="none"/>'
+            f'<path d="M0 {safe_height - 2} L{safe_width} 2" '
+            'stroke="#42A5F5" stroke-width="2" fill="none"/>'
+            '</svg>'
+        )
+
+    def _open_transition_editor(self, selected_pair: int | None = None) -> None:
+        """Показывает весь плейлист единой двухдорожечной монтажной лентой."""
+        playlist_id = self._selected_playlist_id
+        if playlist_id is None:
+            return
+        try:
+            tracks = self.service.playlists.tracks(playlist_id)
+            repository = self.service.set_timeline
+            saved_by_pair = {
+                (item.outgoing_track_id, item.incoming_track_id): item
+                for item in repository.transitions(playlist_id)
+            }
+            cues_by_track = repository.cue_points_for_tracks(
+                [track.id for track in tracks]
+            )
+        except (PlaylistError, SetTimelineRepositoryError) as exc:
+            self._notify(str(exc))
+            return
+        if len(tracks) < 2:
+            self._notify("Для монтажа перехода нужны минимум два трека")
+            return
+
+        transitions: list[SavedTransition] = []
+        layout_transitions: list[TimelineTransition] = []
+        for outgoing, incoming in zip(tracks, tracks[1:]):
+            outgoing_bpm = track_bpm(outgoing) or 120.0
+            saved = saved_by_pair.get((outgoing.id, incoming.id))
+            if saved is None:
+                bars_per_square = 8
+                square_count = 1
+                overlap_ms = round(
+                    bars_per_square * 4 * square_count * 60_000 / outgoing_bpm
+                )
+                outgoing_duration_ms = round(
+                    (outgoing.technical.duration or 0) * 1000
+                )
+                saved = SavedTransition(
+                    playlist_id=playlist_id,
+                    outgoing_track_id=outgoing.id,
+                    incoming_track_id=incoming.id,
+                    outgoing_cue_ms=max(0, outgoing_duration_ms - overlap_ms),
+                    incoming_cue_ms=0,
+                    bars_per_square=bars_per_square,
+                    square_count=square_count,
+                )
+            overlap_ms = round(
+                saved.bars_per_square
+                * 4
+                * saved.square_count
+                * 60_000
+                / outgoing_bpm
+            )
+            transitions.append(saved)
+            layout_transitions.append(
+                TimelineTransition(
+                    outgoing_track_id=outgoing.id,
+                    incoming_track_id=incoming.id,
+                    outgoing_cue_ms=saved.outgoing_cue_ms,
+                    incoming_cue_ms=saved.incoming_cue_ms,
+                    overlap_ms=overlap_ms,
+                )
+            )
+        try:
+            layout = build_playlist_timeline(
+                [
+                    (track.id, round((track.technical.duration or 0) * 1000))
+                    for track in tracks
+                ],
+                layout_transitions,
+            )
+        except SetTimelineError as exc:
+            self._notify(str(exc))
+            return
+
+        if selected_pair is not None:
+            self._timeline_selected_pair = min(
+                max(0, selected_pair), len(transitions) - 1
+            )
+        elif not hasattr(self, "_timeline_selected_pair"):
+            self._timeline_selected_pair = 0
+        self._timeline_selected_pair = min(
+            max(0, self._timeline_selected_pair), len(transitions) - 1
+        )
+        zoom = float(getattr(self, "_timeline_zoom_px_per_second", 3.0))
+        zoom = min(12.0, max(0.75, zoom))
+        self._timeline_zoom_px_per_second = zoom
+        pixels_per_ms = zoom / 1000
+        left_margin = 28.0
+        ruler_height = 34.0
+        lane_height = 104.0
+        lane_gap = 12.0
+        timeline_height = ruler_height + lane_height * 2 + lane_gap + 18
+        timeline_width = max(1000.0, left_margin + layout.duration_ms * pixels_per_ms)
+        track_by_id = {track.id: track for track in tracks}
+        drag_deltas: dict[int, float] = {}
+        status = ft.Text(
+            "Перетащите входящий трек по горизонтали; клик запускает его с выбранной позиции.",
+            size=COMPACT_UI.font_xs,
+            color=ft.Colors.ON_SURFACE_VARIANT,
+        )
+        stack_controls: list[ft.Control] = []
+
+        # Общая тёмная монтажная область и подписи дорожек.
+        stack_controls.extend(
+            [
+                ft.Container(
+                    left=0,
+                    top=0,
+                    width=timeline_width,
+                    height=timeline_height,
+                    bgcolor="#090C10",
+                ),
+                ft.Text(
+                    "A",
+                    left=7,
+                    top=ruler_height + lane_height / 2 - 10,
+                    color=ft.Colors.PRIMARY,
+                    weight=ft.FontWeight.BOLD,
+                ),
+                ft.Text(
+                    "B",
+                    left=7,
+                    top=ruler_height + lane_height + lane_gap + lane_height / 2 - 10,
+                    color=ft.Colors.TERTIARY,
+                    weight=ft.FontWeight.BOLD,
+                ),
+            ]
+        )
+
+        # Линейка времени не создаёт сотни Flet-контролов: шаг зависит от масштаба.
+        ruler_step_ms = 10_000 if zoom >= 3 else 30_000
+        tick = 0
+        while tick <= layout.duration_ms:
+            x = left_margin + tick * pixels_per_ms
+            stack_controls.append(
+                ft.Container(
+                    left=x,
+                    top=20,
+                    width=1,
+                    height=timeline_height - 20,
+                    bgcolor="#26313D",
+                )
+            )
+            stack_controls.append(
+                ft.Text(
+                    self._format_duration(tick / 1000),
+                    left=x + 3,
+                    top=1,
+                    size=COMPACT_UI.font_micro,
+                    color=ft.Colors.ON_SURFACE_VARIANT,
+                )
+            )
+            tick += ruler_step_ms
+
+        # Зоны наложения и кнопки точной настройки рисуются под клипами.
+        for index, (transition, position_ms) in enumerate(
+            zip(layout_transitions, layout.transition_positions_ms)
+        ):
+            overlay_width = max(20.0, transition.overlap_ms * pixels_per_ms)
+            overlay_left = left_margin + position_ms * pixels_per_ms
+            overlay_height = lane_height * 2 + lane_gap
+            stack_controls.append(
+                ft.Image(
+                    src=self._arrangement_fade_svg(overlay_width, overlay_height),
+                    left=overlay_left,
+                    top=ruler_height,
+                    width=overlay_width,
+                    height=overlay_height,
+                    fit=ft.BoxFit.FILL,
+                    exclude_from_semantics=True,
+                )
+            )
+            stack_controls.append(
+                ft.IconButton(
+                    icon=ft.Icons.TUNE,
+                    tooltip=f"Настроить переход {index + 1}",
+                    left=overlay_left + 2,
+                    top=1,
+                    icon_size=16,
+                    on_click=lambda _, current=index: self._open_transition_pair_editor(
+                        current
+                    ),
+                )
+            )
+
+        def play_from_clip(event: object, track: TrackRecord, clip_width: float) -> None:
+            local = getattr(event, "local_position", None)
+            duration_ms = round((track.technical.duration or 0) * 1000)
+            if local is None or duration_ms <= 0:
+                return
+            position_ms = round(
+                min(1.0, max(0.0, local.x / max(1.0, clip_width))) * duration_ms
+            )
+            self.page.run_task(self._play_track, track.id, position_ms)
+
+        def begin_drag(index: int) -> None:
+            drag_deltas[index] = 0.0
+
+        def update_drag(event: object, index: int, holder: ft.Container) -> None:
+            delta = float(getattr(event, "primary_delta", 0.0) or 0.0)
+            drag_deltas[index] = drag_deltas.get(index, 0.0) + delta
+            holder.left = max(left_margin, float(holder.left or 0) + delta)
+            self.page.update(holder)
+
+        def finish_drag(index: int) -> None:
+            if index <= 0:
+                return
+            delta_px = drag_deltas.pop(index, 0.0)
+            if abs(delta_px) < 1:
+                return
+            transition = transitions[index - 1]
+            outgoing = tracks[index - 1]
+            outgoing_bpm = track_bpm(outgoing) or 120.0
+            anchor_ms = next(
+                (
+                    cue.position_ms
+                    for cue in cues_by_track.get(outgoing.id, [])
+                    if cue.slot == 1
+                ),
+                0,
+            )
+            delta_ms = round(delta_px / pixels_per_ms)
+            overlap_ms = layout_transitions[index - 1].overlap_ms
+            duration_ms = round((outgoing.technical.duration or 0) * 1000)
+            raw_cue = transition.outgoing_cue_ms + delta_ms
+            snapped = snap_to_square(
+                raw_cue,
+                outgoing_bpm,
+                transition.bars_per_square,
+                anchor_ms=anchor_ms,
+            )
+            snapped = min(max(0, snapped), max(0, duration_ms - overlap_ms))
+            updated = SavedTransition(
+                playlist_id=transition.playlist_id,
+                outgoing_track_id=transition.outgoing_track_id,
+                incoming_track_id=transition.incoming_track_id,
+                outgoing_cue_ms=snapped,
+                incoming_cue_ms=transition.incoming_cue_ms,
+                bars_per_square=transition.bars_per_square,
+                square_count=transition.square_count,
+            )
+            try:
+                repository.save_transition(updated)
+            except SetTimelineRepositoryError as exc:
+                self._notify(str(exc))
+                self._open_transition_editor(index - 1)
+                return
+            self._timeline_selected_pair = index - 1
+            self._open_transition_editor(index - 1)
+            self._notify(
+                f"Переход {index}: точка A "
+                f"{self._format_duration(snapped / 1000)}"
+            )
+
+        # Сами клипы чередуются между дорожками A/B.
+        for clip in layout.clips:
+            track = track_by_id[clip.track_id]
+            width = max(120.0, clip.duration_ms * pixels_per_ms)
+            top = ruler_height + clip.lane * (lane_height + lane_gap)
+            left = left_margin + clip.start_ms * pixels_per_ms
+            cues = {
+                cue.slot: cue.position_ms
+                for cue in cues_by_track.get(track.id, [])
+            }
+            bpm = track_bpm(track)
+            bars_per_square = (
+                transitions[clip.index].bars_per_square
+                if clip.index < len(transitions)
+                else transitions[-1].bars_per_square
+            )
+            waveform = ft.Image(
+                src=self._arrangement_waveform_svg(
+                    track.waveform.peaks if track.waveform else (),
+                    width=width,
+                    height=lane_height,
+                    duration_ms=clip.duration_ms,
+                    bpm=bpm,
+                    anchor_ms=cues.get(1, 0),
+                    bars_per_square=bars_per_square,
+                    cue_points=cues,
+                ),
+                width=width,
+                height=lane_height,
+                fit=ft.BoxFit.FILL,
+                exclude_from_semantics=True,
+            )
+            clip_label = (
+                f"{clip.index + 1}. {self._transition_track_title(track)} · "
+                f"{bpm:.2f} BPM"
+                if bpm is not None
+                else f"{clip.index + 1}. {self._transition_track_title(track)} · BPM —"
+            )
+            holder = ft.Container(
+                left=left,
+                top=top,
+                width=width,
+                height=lane_height,
+                border=ft.Border.all(
+                    2 if clip.index - 1 == self._timeline_selected_pair else 1,
+                    ft.Colors.PRIMARY
+                    if clip.index - 1 == self._timeline_selected_pair
+                    else ft.Colors.OUTLINE_VARIANT,
+                ),
+                border_radius=3,
+                clip_behavior=ft.ClipBehavior.HARD_EDGE,
+            )
+            holder.content = ft.GestureDetector(
+                content=ft.Stack(
+                    controls=[
+                        waveform,
+                        ft.Container(
+                            left=5,
+                            top=4,
+                            padding=ft.Padding.symmetric(horizontal=5, vertical=2),
+                            bgcolor="#CC10141A",
+                            border_radius=3,
+                            content=ft.Text(
+                                clip_label,
+                                size=COMPACT_UI.font_micro,
+                                color=ft.Colors.WHITE,
+                                max_lines=1,
+                                overflow=ft.TextOverflow.ELLIPSIS,
+                            ),
+                        ),
+                    ],
+                    width=width,
+                    height=lane_height,
+                ),
+                mouse_cursor=(
+                    ft.MouseCursor.GRAB if clip.index > 0 else ft.MouseCursor.CLICK
+                ),
+                on_tap=lambda event, current=track, current_width=width: (
+                    play_from_clip(event, current, current_width)
+                ),
+                on_horizontal_drag_start=(
+                    (lambda _, current=clip.index: begin_drag(current))
+                    if clip.index > 0
+                    else None
+                ),
+                on_horizontal_drag_update=(
+                    (
+                        lambda event, current=clip.index, current_holder=holder: (
+                            update_drag(event, current, current_holder)
+                        )
+                    )
+                    if clip.index > 0
+                    else None
+                ),
+                on_horizontal_drag_end=(
+                    (lambda _, current=clip.index: finish_drag(current))
+                    if clip.index > 0
+                    else None
+                ),
+            )
+            stack_controls.append(holder)
+
+        timeline_stack = ft.Stack(
+            controls=stack_controls,
+            width=timeline_width,
+            height=timeline_height,
+        )
+        horizontal_timeline = ft.Row(
+            controls=[timeline_stack],
+            scroll=ft.ScrollMode.AUTO,
+            expand=True,
+            vertical_alignment=ft.CrossAxisAlignment.START,
+        )
+
+        def change_zoom(delta: float) -> None:
+            self._timeline_zoom_px_per_second = min(
+                12.0,
+                max(0.75, self._timeline_zoom_px_per_second + delta),
+            )
+            self._open_transition_editor(self._timeline_selected_pair)
+
+        def fit_timeline() -> None:
+            seconds = max(1.0, layout.duration_ms / 1000)
+            self._timeline_zoom_px_per_second = min(12.0, max(0.75, 1000 / seconds))
+            self._open_transition_editor(self._timeline_selected_pair)
+
+        selected_index = min(
+            max(0, self._timeline_selected_pair), len(transitions) - 1
+        )
+        selected_transition = transitions[selected_index]
+        selected_outgoing = track_by_id[selected_transition.outgoing_track_id]
+        selected_incoming = track_by_id[selected_transition.incoming_track_id]
+        selected_preview_button = ft.Button(
+            content="Прослушать наложение",
+            icon=ft.Icons.PLAY_CIRCLE_OUTLINE,
+        )
+
+        async def preview_selected_transition() -> None:
+            try:
+                plan = build_transition_plan(
+                    outgoing_cue_ms=selected_transition.outgoing_cue_ms,
+                    incoming_cue_ms=selected_transition.incoming_cue_ms,
+                    outgoing_bpm=track_bpm(selected_outgoing),
+                    incoming_bpm=track_bpm(selected_incoming),
+                    outgoing_duration_ms=round(
+                        (selected_outgoing.technical.duration or 0) * 1000
+                    ),
+                    incoming_duration_ms=round(
+                        (selected_incoming.technical.duration or 0) * 1000
+                    ),
+                    bars_per_square=selected_transition.bars_per_square,
+                    square_count=selected_transition.square_count,
+                )
+                ffmpeg = self.runtime.ffmpeg_path()
+                if ffmpeg is None:
+                    raise TransitionPreviewError("FFmpeg недоступен")
+                selected_preview_button.disabled = True
+                selected_preview_button.content = "Собирается…"
+                self.page.update(selected_preview_button)
+                output = await self.workers.run(
+                    render_transition_preview,
+                    ffmpeg,
+                    selected_outgoing.path,
+                    selected_incoming.path,
+                    self.paths.data_dir / "transition_previews",
+                    plan,
+                )
+                await self._play_external_audio(
+                    output,
+                    f"Переход: {self._transition_track_title(selected_outgoing)} → "
+                    f"{self._transition_track_title(selected_incoming)}",
+                )
+                status.value = "Наложение воспроизводится"
+                status.color = ft.Colors.PRIMARY
+            except (SetTimelineError, TransitionPreviewError) as exc:
+                status.value = str(exc)
+                status.color = ft.Colors.ERROR
+            finally:
+                selected_preview_button.disabled = False
+                selected_preview_button.content = "Прослушать наложение"
+                self.page.update(selected_preview_button, status)
+
+        selected_preview_button.on_click = lambda _: self.page.run_task(
+            preview_selected_transition
+        )
+        toolbar = ft.Row(
+            controls=[
+                ft.Button(
+                    content="К плейлистам",
+                    icon=ft.Icons.ARROW_BACK,
+                    on_click=lambda _: self.show_playlists(local_update=True),
+                ),
+                ft.Text(
+                    f"Треков: {len(tracks)} · Длина ленты: "
+                    f"{duration_label(layout.duration_ms / 1000)}",
+                    size=COMPACT_UI.font_sm,
+                ),
+                ft.Container(expand=True),
+                ft.IconButton(
+                    icon=ft.Icons.REMOVE,
+                    tooltip="Уменьшить масштаб",
+                    on_click=lambda _: change_zoom(-0.75),
+                ),
+                ft.Text(f"{zoom:.2f} px/с", size=COMPACT_UI.font_xs),
+                ft.IconButton(
+                    icon=ft.Icons.ADD,
+                    tooltip="Увеличить масштаб",
+                    on_click=lambda _: change_zoom(0.75),
+                ),
+                ft.Button(content="Вместить", on_click=lambda _: fit_timeline()),
+            ],
+            wrap=True,
+        )
+        selected_bar = ft.Row(
+            controls=[
+                ft.Text(
+                    f"Переход {selected_index + 1}: "
+                    f"{self._transition_track_title(selected_outgoing)} → "
+                    f"{self._transition_track_title(selected_incoming)}",
+                    expand=True,
+                    max_lines=1,
+                    overflow=ft.TextOverflow.ELLIPSIS,
+                ),
+                selected_preview_button,
+                ft.Button(
+                    content="Точки, квадраты и preview",
+                    icon=ft.Icons.TUNE,
+                    on_click=lambda _: self._open_transition_pair_editor(
+                        selected_index
+                    ),
+                ),
+            ]
+        )
+        pair_buttons = ft.Row(
+            controls=[
+                ft.Button(
+                    content=str(index + 1),
+                    tooltip=(
+                        f"{self._transition_track_title(first)} → "
+                        f"{self._transition_track_title(second)}"
+                    ),
+                    on_click=lambda _, current=index: self._open_transition_editor(
+                        current
+                    ),
+                )
+                for index, (first, second) in enumerate(zip(tracks, tracks[1:]))
+            ],
+            scroll=ft.ScrollMode.AUTO,
+        )
+        self._replace_content(
+            "Лента сета",
+            "Две дорожки, общая шкала, Cue, квадраты и видимое наложение",
+            toolbar,
+            selected_bar,
+            self._surface_card(horizontal_timeline, padding=6),
+            pair_buttons,
+            status,
+            local_update=True,
+        )
+
+    def _open_transition_pair_editor(self, pair_index: int = 0) -> None:
+        """Открывает точную настройку выбранной соседней пары."""
         playlist_id = self._selected_playlist_id
         if playlist_id is None:
             return
@@ -854,7 +1463,7 @@ class PlaylistUI:
                 )
                 for index, (first, second) in enumerate(zip(tracks, tracks[1:]))
             ],
-            on_select=lambda event: self._open_transition_editor(
+            on_select=lambda event: self._open_transition_pair_editor(
                 int(getattr(event.control, "value", 0))
             ),
         )
@@ -1138,9 +1747,9 @@ class PlaylistUI:
         toolbar = ft.Row(
             controls=[
                 ft.Button(
-                    content="К плейлистам",
+                    content="К общей ленте",
                     icon=ft.Icons.ARROW_BACK,
-                    on_click=lambda _: self.show_playlists(local_update=True),
+                    on_click=lambda _: self._open_transition_editor(pair_index),
                 ),
                 pair,
                 bars,

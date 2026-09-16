@@ -46,6 +46,98 @@ class TransitionPlan:
         return self.target_bpm / self.incoming_bpm
 
 
+@dataclass(frozen=True, slots=True)
+class TimelineTransition:
+    """Точки соседней пары, которые должны совпасть на общей шкале."""
+
+    outgoing_track_id: int
+    incoming_track_id: int
+    outgoing_cue_ms: int
+    incoming_cue_ms: int
+    overlap_ms: int
+
+
+@dataclass(frozen=True, slots=True)
+class TimelineClip:
+    """Положение одного трека на верхней или нижней монтажной дорожке."""
+
+    track_id: int
+    index: int
+    lane: int
+    start_ms: int
+    duration_ms: int
+
+    @property
+    def end_ms(self) -> int:
+        return self.start_ms + self.duration_ms
+
+
+@dataclass(frozen=True, slots=True)
+class TimelineLayout:
+    clips: tuple[TimelineClip, ...]
+    transition_positions_ms: tuple[int, ...]
+    duration_ms: int
+
+
+def build_playlist_timeline(
+    tracks: list[tuple[int, int]] | tuple[tuple[int, int], ...],
+    transitions: list[TimelineTransition] | tuple[TimelineTransition, ...],
+) -> TimelineLayout:
+    """Совмещает Cue соседних треков и чередует клипы по двум дорожкам."""
+    if not tracks:
+        return TimelineLayout((), (), 0)
+    transition_by_pair = {
+        (item.outgoing_track_id, item.incoming_track_id): item
+        for item in transitions
+    }
+    clips = [
+        TimelineClip(
+            track_id=tracks[0][0],
+            index=0,
+            lane=0,
+            start_ms=0,
+            duration_ms=max(1, tracks[0][1]),
+        )
+    ]
+    positions: list[int] = []
+    for index, ((previous_id, _), (track_id, duration_ms)) in enumerate(
+        zip(tracks, tracks[1:])
+    ):
+        transition = transition_by_pair.get((previous_id, track_id))
+        if transition is None:
+            raise SetTimelineError(
+                f"Не заданы точки перехода {previous_id} → {track_id}"
+            )
+        previous = clips[-1]
+        position = previous.start_ms + transition.outgoing_cue_ms
+        start_ms = position - transition.incoming_cue_ms
+        positions.append(position)
+        clips.append(
+            TimelineClip(
+                track_id=track_id,
+                index=index + 1,
+                lane=(index + 1) % 2,
+                start_ms=start_ms,
+                duration_ms=max(1, duration_ms),
+            )
+        )
+    shift_ms = max(0, -min(item.start_ms for item in clips))
+    if shift_ms:
+        clips = [
+            TimelineClip(
+                track_id=item.track_id,
+                index=item.index,
+                lane=item.lane,
+                start_ms=item.start_ms + shift_ms,
+                duration_ms=item.duration_ms,
+            )
+            for item in clips
+        ]
+        positions = [value + shift_ms for value in positions]
+    duration_ms = max(item.end_ms for item in clips)
+    return TimelineLayout(tuple(clips), tuple(positions), duration_ms)
+
+
 def validate_bpm(value: float | int | None, label: str = "BPM") -> float:
     try:
         bpm = float(value)
@@ -62,6 +154,22 @@ def snap_to_beat(position_ms: int, bpm: float, *, anchor_ms: int = 0) -> int:
     beat_ms = 60_000 / bpm
     relative = max(0, position_ms - anchor_ms)
     return max(0, round(anchor_ms + round(relative / beat_ms) * beat_ms))
+
+
+def snap_to_square(
+    position_ms: int,
+    bpm: float,
+    bars_per_square: int,
+    *,
+    anchor_ms: int = 0,
+) -> int:
+    """Привязывает целый клип к ближайшей границе музыкального квадрата."""
+    bpm = validate_bpm(bpm)
+    if bars_per_square not in ALLOWED_BARS_PER_SQUARE:
+        raise SetTimelineError("Размер квадрата должен быть 4, 8 или 16 тактов")
+    square_ms = 60_000 / bpm * BEATS_PER_BAR * bars_per_square
+    relative = position_ms - anchor_ms
+    return max(0, round(anchor_ms + round(relative / square_ms) * square_ms))
 
 
 def move_by_beats(position_ms: int, beats: int, bpm: float) -> int:

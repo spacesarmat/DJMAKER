@@ -82,6 +82,29 @@ class SetTimelineRepository:
             ) from exc
         return [CuePoint(**dict(row)) for row in rows]
 
+    def cue_points_for_tracks(self, track_ids: list[int]) -> dict[int, list[CuePoint]]:
+        """Читает Cue всего плейлиста одним SQLite-запросом."""
+        unique_ids = list(dict.fromkeys(track_ids))
+        result = {track_id: [] for track_id in unique_ids}
+        if not unique_ids:
+            return result
+        placeholders = ",".join("?" for _ in unique_ids)
+        try:
+            with self.database.connection() as conn:
+                rows = conn.execute(
+                    "SELECT track_id, slot, position_ms FROM track_cue_points "
+                    f"WHERE track_id IN ({placeholders}) ORDER BY track_id, slot",
+                    unique_ids,
+                ).fetchall()
+        except sqlite3.Error as exc:
+            raise SetTimelineRepositoryError(
+                f"Не удалось прочитать быстрые точки: {exc}"
+            ) from exc
+        for row in rows:
+            cue = CuePoint(**dict(row))
+            result[cue.track_id].append(cue)
+        return result
+
     def save_cue_point(self, track_id: int, slot: int, position_ms: int) -> None:
         if slot not in range(1, 5):
             raise SetTimelineRepositoryError("Доступны быстрые точки 1–4")
@@ -122,6 +145,22 @@ class SetTimelineRepository:
                 f"Не удалось прочитать переход: {exc}"
             ) from exc
         return SavedTransition(**dict(row)) if row else None
+
+    def transitions(self, playlist_id: int) -> list[SavedTransition]:
+        """Возвращает все сохранённые переходы плейлиста одним запросом."""
+        try:
+            with self.database.connection() as conn:
+                rows = conn.execute(
+                    "SELECT playlist_id, outgoing_track_id, incoming_track_id, "
+                    "outgoing_cue_ms, incoming_cue_ms, bars_per_square, square_count "
+                    "FROM playlist_transitions WHERE playlist_id=?",
+                    (playlist_id,),
+                ).fetchall()
+        except sqlite3.Error as exc:
+            raise SetTimelineRepositoryError(
+                f"Не удалось прочитать переходы: {exc}"
+            ) from exc
+        return [SavedTransition(**dict(row)) for row in rows]
 
     def save_transition(self, transition: SavedTransition) -> None:
         if transition.outgoing_track_id == transition.incoming_track_id:

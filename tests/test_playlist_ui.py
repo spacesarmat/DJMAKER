@@ -212,7 +212,7 @@ class PlaylistUIFlowTests(unittest.IsolatedAsyncioTestCase):
         playlist_id = self.repo.create_with_tracks("Mix", self.ids)
         self.ui._selected_playlist_id = playlist_id
 
-        self.ui._open_transition_editor()
+        self.ui._open_transition_pair_editor()
 
         toolbar, actions, timeline = self.ui.content.controls
         self.assertEqual(toolbar.controls[1].value, "0")
@@ -226,6 +226,38 @@ class PlaylistUIFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(saved)
         self.assertGreater(saved.outgoing_cue_ms, 0)
         self.assertIn("Сохранено", actions.controls[2].value)
+
+    def test_arrangement_timeline_overlaps_lanes_and_drag_saves_position(self) -> None:
+        playlist_id = self.repo.create_with_tracks("Timeline", self.ids)
+        self.ui._selected_playlist_id = playlist_id
+
+        self.ui._open_transition_editor()
+
+        self.assertEqual(len(self.ui.content.controls), 5)
+        selected_bar = self.ui.content.controls[1]
+        self.assertEqual(selected_bar.controls[1].content, "Прослушать наложение")
+        self.ui.page.run_task.reset_mock()
+        selected_bar.controls[1].on_click(None)
+        self.ui.page.run_task.assert_called_once()
+        timeline_row = self.ui.content.controls[2].content
+        timeline_stack = timeline_row.controls[0]
+        draggable = [
+            control
+            for control in timeline_stack.controls
+            if isinstance(control, ft.Container)
+            and isinstance(control.content, ft.GestureDetector)
+            and control.content.on_horizontal_drag_update is not None
+        ]
+        self.assertEqual(len(draggable), 1)
+        gesture = draggable[0].content
+        gesture.on_horizontal_drag_start(None)
+        gesture.on_horizontal_drag_update(SimpleNamespace(primary_delta=-30.0))
+        gesture.on_horizontal_drag_end(None)
+        saved = self.ui.service.set_timeline.transition(
+            playlist_id, self.ids[0], self.ids[1]
+        )
+        self.assertIsNotNone(saved)
+        self.assertLess(saved.outgoing_cue_ms, 45_000)
 
     async def test_export_with_files_through_picker_and_task(self) -> None:
         self.create_through_dialog()
