@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import subprocess
 import tempfile
 import time
 from pathlib import Path
 
-from djmaker.domain.models import AudioAnalysis
+from djmaker.domain.beat_grid import BeatGridError, validate_beat_grid
+from djmaker.domain.models import AudioAnalysis, BeatGridAnalysis
 from djmaker.runtime.dependencies import RuntimeDependencies
 from djmaker.services.tasks import TaskControl, TaskInterrupted
 
@@ -205,11 +207,41 @@ def parse_analysis_payload(payload: bytes | str) -> AudioAnalysis:
     musical_key = str(data.get("key") or "").strip()
     scale = str(data.get("scale") or "").strip().lower()
     key_strength = _optional_float(data.get("key_strength"), "key_strength")
+    beat_ticks_ms = _beat_ticks_ms(data.get("beat_ticks"))
+    first_beat = _optional_float(data.get("first_beat"), "first_beat")
+    first_downbeat = _optional_float(data.get("first_downbeat"), "first_downbeat")
+    tempo_stability = _normalized_optional_float(
+        data.get("tempo_stability"), "tempo_stability"
+    )
+    downbeat_confidence = _normalized_optional_float(
+        data.get("downbeat_confidence"), "downbeat_confidence"
+    )
 
     if bpm is not None and bpm <= 0:
         bpm = None
     if scale not in {"major", "minor"}:
         scale = ""
+
+    beat_grid: BeatGridAnalysis | None = None
+    if bpm is not None:
+        if not beat_ticks_ms or first_beat is None or first_downbeat is None:
+            raise AudioAnalysisError(
+                "Essentia runtime не вернула полную BPM-сетку. "
+                "Обновите аудио-компоненты DJMAKER."
+            )
+        beat_grid = BeatGridAnalysis(
+            bpm=bpm,
+            first_beat_ms=max(0, round(first_beat * 1000)),
+            downbeat_ms=max(0, round(first_downbeat * 1000)),
+            beats_per_bar=4,
+            beat_ticks_ms=beat_ticks_ms,
+            tempo_stability=tempo_stability,
+            downbeat_confidence=downbeat_confidence,
+        )
+        try:
+            validate_beat_grid(beat_grid)
+        except BeatGridError as exc:
+            raise AudioAnalysisError(f"Некорректная BPM-сетка Essentia: {exc}") from exc
 
     return AudioAnalysis(
         bpm=bpm,
@@ -218,7 +250,29 @@ def parse_analysis_payload(payload: bytes | str) -> AudioAnalysis:
         scale=scale,
         key_strength=key_strength,
         camelot=camelot_code(musical_key, scale),
+        beat_grid=beat_grid,
     )
+
+
+def _beat_ticks_ms(value: object) -> tuple[int, ...]:
+    if not isinstance(value, list):
+        return ()
+    ticks: set[int] = set()
+    for index, item in enumerate(value):
+        tick = _optional_float(item, f"beat_ticks[{index}]")
+        if tick is None or tick < 0:
+            raise AudioAnalysisError("Essentia вернула некорректную позицию удара")
+        ticks.add(round(tick * 1000))
+    return tuple(sorted(ticks))
+
+
+def _normalized_optional_float(value: object, field: str) -> float | None:
+    parsed = _optional_float(value, field)
+    if parsed is None:
+        return None
+    if not 0 <= parsed <= 1:
+        raise AudioAnalysisError(f"Поле {field} должно быть от 0 до 1")
+    return parsed
 
 
 def camelot_code(musical_key: str, scale: str) -> str:
@@ -293,9 +347,12 @@ def _optional_float(value: object, field: str) -> float | None:
     if isinstance(value, bool):
         raise AudioAnalysisError(f"Поле {field} имеет неверный тип")
     try:
-        return float(value)
+        parsed = float(value)
     except (TypeError, ValueError) as exc:
         raise AudioAnalysisError(f"Поле {field} имеет неверный тип") from exc
+    if not math.isfinite(parsed):
+        raise AudioAnalysisError(f"Поле {field} не является конечным числом")
+    return parsed
 
 
 def _terminate_process(process: subprocess.Popen[bytes]) -> None:
@@ -312,4 +369,3 @@ def _terminate_process(process: subprocess.Popen[bytes]) -> None:
 def _creation_flags() -> int:
     """Не показывает консольные окна FFmpeg/Essentia в Windows GUI."""
     return int(getattr(subprocess, "CREATE_NO_WINDOW", 0))
-

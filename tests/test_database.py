@@ -10,6 +10,7 @@ from djmaker.domain.models import (
     AudioAnalysis,
     AudioMetadata,
     AudioTechnicalInfo,
+    BeatGridAnalysis,
     WaveformAnalysis,
 )
 from djmaker.infrastructure.database import LibraryDatabase
@@ -38,6 +39,17 @@ class LibraryDatabaseTests(unittest.TestCase):
             metadata=AudioMetadata(title=name, artist="Artist"),
             technical=AudioTechnicalInfo(duration=123.0),
             scan_token="token",
+        )
+
+    @staticmethod
+    def _grid(bpm: float = 120.0) -> BeatGridAnalysis:
+        return BeatGridAnalysis(
+            bpm=bpm,
+            first_beat_ms=250,
+            downbeat_ms=750,
+            beat_ticks_ms=(250, 750, 1250, 1750),
+            tempo_stability=0.98,
+            downbeat_confidence=0.65,
         )
 
     def test_exact_duplicates_group_by_full_hash(self) -> None:
@@ -106,6 +118,7 @@ class LibraryDatabaseTests(unittest.TestCase):
                 scale="minor",
                 key_strength=0.8,
                 camelot="8A",
+                beat_grid=self._grid(128.0),
             ),
         )
 
@@ -118,6 +131,11 @@ class LibraryDatabaseTests(unittest.TestCase):
         self.assertEqual(128.0, updated.analysis.bpm)
         self.assertEqual("8A", updated.analysis.camelot)
         self.assertTrue(updated.analysis.analyzed_at)
+        self.assertIsNotNone(updated.analysis.beat_grid)
+        assert updated.analysis.beat_grid is not None
+        self.assertEqual((250, 750, 1250, 1750), updated.analysis.beat_grid.beat_ticks_ms)
+        self.assertEqual(750, updated.analysis.beat_grid.downbeat_ms)
+        self.assertTrue(updated.analysis.beat_grid.analyzed_at)
 
     def test_analysis_queue_excludes_completed_tracks(self) -> None:
         self._insert("one.mp3", "abc")
@@ -125,7 +143,13 @@ class LibraryDatabaseTests(unittest.TestCase):
         first = self.db.list_tracks()[0]
         self.db.save_audio_analysis(
             first.id,
-            AudioAnalysis(bpm=120.0, musical_key="C", scale="major", camelot="8B"),
+            AudioAnalysis(
+                bpm=120.0,
+                musical_key="C",
+                scale="major",
+                camelot="8B",
+                beat_grid=self._grid(),
+            ),
         )
 
         pending = self.db.list_tracks_for_analysis()
@@ -139,6 +163,16 @@ class LibraryDatabaseTests(unittest.TestCase):
         self.assertEqual((1, 0), self.db.analysis_counts())
         self.db.save_audio_analysis(track.id, AudioAnalysis(bpm=120.0))
         self.assertEqual((1, 1), self.db.analysis_counts())
+        self.assertEqual((1, 0), self.db.beat_grid_counts())
+
+    def test_unavailable_bpm_completes_grid_analysis_without_fake_grid(self) -> None:
+        self._insert("one.mp3", "abc")
+        track = self.db.list_tracks()[0]
+
+        self.db.save_audio_analysis(track.id, AudioAnalysis(bpm=None))
+
+        self.assertEqual((1, 1), self.db.beat_grid_counts())
+        self.assertEqual([], self.db.list_tracks_for_analysis())
 
     def test_changed_file_hash_invalidates_previous_analysis(self) -> None:
         self._insert("one.mp3", "abc")
@@ -229,7 +263,7 @@ class LibraryDatabaseTests(unittest.TestCase):
         self.assertEqual((0, 0), self.db.waveform_counts())
         with self.db.connection() as conn:
             self.assertEqual(
-                6,
+                7,
                 conn.execute("PRAGMA user_version").fetchone()[0],
             )
 
@@ -285,7 +319,7 @@ class LibraryDatabaseMigrationTests(unittest.TestCase):
                     for row in conn.execute("PRAGMA table_info(tracks)").fetchall()
                 }
 
-            self.assertEqual(6, version)
+            self.assertEqual(7, version)
             self.assertIn("analysis_bpm", columns)
             self.assertIn("analysis_key", columns)
             self.assertIn("analysis_camelot", columns)
@@ -294,6 +328,8 @@ class LibraryDatabaseMigrationTests(unittest.TestCase):
             self.assertIn("embedded_artwork_checked", columns)
             self.assertIn("waveform_peaks", columns)
             self.assertIn("waveform_analyzed_at", columns)
+            self.assertIn("beat_grid_json", columns)
+            self.assertIn("beat_grid_analyzed_at", columns)
 
 
     def test_schema_v2_is_migrated_to_embedded_artwork_columns(self) -> None:
@@ -314,7 +350,7 @@ class LibraryDatabaseMigrationTests(unittest.TestCase):
                     for row in conn.execute("PRAGMA table_info(tracks)").fetchall()
                 }
 
-            self.assertEqual(6, version)
+            self.assertEqual(7, version)
             self.assertIn("embedded_artwork_path", columns)
             self.assertIn("embedded_artwork_checked", columns)
             self.assertIn("waveform_peaks", columns)
@@ -338,9 +374,36 @@ class LibraryDatabaseMigrationTests(unittest.TestCase):
                     for row in conn.execute("PRAGMA table_info(tracks)").fetchall()
                 }
 
-            self.assertEqual(6, version)
+            self.assertEqual(7, version)
             self.assertIn("waveform_peaks", columns)
             self.assertIn("waveform_analyzed_at", columns)
+
+    def test_schema_v6_is_migrated_to_grid_columns_and_anchor_table(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "library.sqlite3"
+            with closing(sqlite3.connect(path)) as conn:
+                conn.execute("CREATE TABLE tracks (id INTEGER PRIMARY KEY)")
+                conn.execute("PRAGMA user_version=6")
+                conn.commit()
+
+            database = LibraryDatabase(path)
+            database.initialize()
+
+            with database.connection() as conn:
+                version = conn.execute("PRAGMA user_version").fetchone()[0]
+                columns = {
+                    row["name"]
+                    for row in conn.execute("PRAGMA table_info(tracks)").fetchall()
+                }
+                anchor_table = conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' "
+                    "AND name='track_beat_grid_anchors'"
+                ).fetchone()
+
+            self.assertEqual(7, version)
+            self.assertIn("beat_grid_json", columns)
+            self.assertIn("beat_grid_analyzed_at", columns)
+            self.assertIsNotNone(anchor_table)
 
 
 if __name__ == "__main__":

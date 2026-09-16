@@ -53,9 +53,19 @@ constexpr int kDefaultMaxTempo = 208;
 struct AnalysisResult {
     Real bpm = 0.0F;
     Real bpm_confidence = 0.0F;
+    std::vector<Real> beat_ticks;
+    Real first_beat = 0.0F;
+    Real first_downbeat = 0.0F;
+    Real tempo_stability = 0.0F;
+    Real downbeat_confidence = 0.0F;
     std::string key;
     std::string scale;
     Real key_strength = 0.0F;
+};
+
+struct DownbeatEstimate {
+    std::size_t phase = 0;
+    Real confidence = 0.0F;
 };
 
 class EssentiaSession {
@@ -126,6 +136,104 @@ std::vector<Real> read_float32_pcm(std::istream& input) {
     return audio;
 }
 
+Real clamp_unit(Real value) {
+    return std::max(static_cast<Real>(0.0), std::min(static_cast<Real>(1.0), value));
+}
+
+Real tempo_stability(const std::vector<Real>& ticks) {
+    if (ticks.size() < 3U) {
+        return 0.0F;
+    }
+    std::vector<Real> intervals;
+    intervals.reserve(ticks.size() - 1U);
+    for (std::size_t index = 1; index < ticks.size(); ++index) {
+        const Real interval = ticks[index] - ticks[index - 1U];
+        if (std::isfinite(interval) && interval > 0.0F) {
+            intervals.push_back(interval);
+        }
+    }
+    if (intervals.size() < 2U) {
+        return 0.0F;
+    }
+    Real mean = 0.0F;
+    for (const Real interval : intervals) {
+        mean += interval;
+    }
+    mean /= static_cast<Real>(intervals.size());
+    if (mean <= 0.0F) {
+        return 0.0F;
+    }
+    Real variance = 0.0F;
+    for (const Real interval : intervals) {
+        const Real delta = interval - mean;
+        variance += delta * delta;
+    }
+    variance /= static_cast<Real>(intervals.size());
+    const Real coefficient = std::sqrt(variance) / mean;
+    return clamp_unit(static_cast<Real>(1.0) - coefficient * static_cast<Real>(4.0));
+}
+
+DownbeatEstimate estimate_downbeat(
+    const std::vector<Real>& audio,
+    const std::vector<Real>& ticks,
+    int sample_rate
+) {
+    DownbeatEstimate estimate;
+    if (ticks.size() < 4U) {
+        return estimate;
+    }
+
+    constexpr std::size_t phases = 4U;
+    std::vector<Real> energy(phases, 0.0F);
+    std::vector<std::size_t> counts(phases, 0U);
+    const std::size_t window = static_cast<std::size_t>(sample_rate * 0.12);
+    for (std::size_t tick_index = 0; tick_index < ticks.size(); ++tick_index) {
+        const Real seconds = ticks[tick_index];
+        if (!std::isfinite(seconds) || seconds < 0.0F) {
+            continue;
+        }
+        const std::size_t start = static_cast<std::size_t>(seconds * sample_rate);
+        if (start >= audio.size()) {
+            continue;
+        }
+        const std::size_t stop = std::min(audio.size(), start + window);
+        Real sum = 0.0F;
+        for (std::size_t sample = start; sample < stop; ++sample) {
+            sum += std::abs(audio[sample]);
+        }
+        if (stop > start) {
+            const std::size_t phase = tick_index % phases;
+            energy[phase] += sum / static_cast<Real>(stop - start);
+            counts[phase] += 1U;
+        }
+    }
+    for (std::size_t phase = 0; phase < phases; ++phase) {
+        if (counts[phase] > 0U) {
+            energy[phase] /= static_cast<Real>(counts[phase]);
+        }
+    }
+    std::size_t best = 0U;
+    std::size_t second = 1U;
+    if (energy[second] > energy[best]) {
+        std::swap(best, second);
+    }
+    for (std::size_t phase = 2U; phase < phases; ++phase) {
+        if (energy[phase] > energy[best]) {
+            second = best;
+            best = phase;
+        } else if (energy[phase] > energy[second]) {
+            second = phase;
+        }
+    }
+    estimate.phase = best;
+    if (energy[best] > std::numeric_limits<Real>::epsilon()) {
+        estimate.confidence = clamp_unit(
+            (energy[best] - energy[second]) / energy[best]
+        );
+    }
+    return estimate;
+}
+
 AnalysisResult analyze(
     const std::vector<Real>& audio,
     int sample_rate,
@@ -169,6 +277,15 @@ AnalysisResult analyze(
     rhythm->output("bpmIntervals").set(intervals);
     rhythm->compute();
 
+    result.beat_ticks = ticks;
+    if (!ticks.empty()) {
+        result.first_beat = ticks.front();
+        const DownbeatEstimate downbeat = estimate_downbeat(audio, ticks, sample_rate);
+        result.first_downbeat = ticks[std::min(downbeat.phase, ticks.size() - 1U)];
+        result.downbeat_confidence = downbeat.confidence;
+    }
+    result.tempo_stability = tempo_stability(ticks);
+
     key_extractor->input("audio").set(audio);
     key_extractor->output("key").set(result.key);
     key_extractor->output("scale").set(result.scale);
@@ -182,6 +299,18 @@ void print_result(const AnalysisResult& result) {
     std::cout << std::fixed << std::setprecision(6)
               << "{\"bpm\":" << result.bpm
               << ",\"bpm_confidence\":" << result.bpm_confidence
+              << ",\"beat_ticks\":[";
+    for (std::size_t index = 0; index < result.beat_ticks.size(); ++index) {
+        if (index > 0U) {
+            std::cout << ',';
+        }
+        std::cout << result.beat_ticks[index];
+    }
+    std::cout << "]"
+              << ",\"first_beat\":" << result.first_beat
+              << ",\"first_downbeat\":" << result.first_downbeat
+              << ",\"tempo_stability\":" << result.tempo_stability
+              << ",\"downbeat_confidence\":" << result.downbeat_confidence
               << ",\"key\":\"" << json_escape(result.key) << "\""
               << ",\"scale\":\"" << json_escape(result.scale) << "\""
               << ",\"key_strength\":" << result.key_strength
@@ -220,7 +349,15 @@ void self_test() {
         kDefaultMinTempo,
         kDefaultMaxTempo
     );
-    if (!std::isfinite(result.bpm) || !std::isfinite(result.key_strength)) {
+    if (
+        !std::isfinite(result.bpm) ||
+        !std::isfinite(result.key_strength) ||
+        !std::isfinite(result.first_beat) ||
+        !std::isfinite(result.first_downbeat) ||
+        !std::isfinite(result.tempo_stability) ||
+        !std::isfinite(result.downbeat_confidence) ||
+        result.beat_ticks.empty()
+    ) {
         throw std::runtime_error("Essentia self-test produced non-finite values");
     }
     std::cout << "{\"ok\":true,\"runtime\":\""

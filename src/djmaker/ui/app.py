@@ -1108,7 +1108,7 @@ class DJMakerUI(PlaylistUI):
                 self._empty_state(
                     ft.Icons.TASK_ALT,
                     "Фоновых задач пока нет",
-                    "Сканирование, Drag&Drop, обложки, waveform и BPM / Key появятся здесь.",
+                    "Сканирование, Drag&Drop, обложки, waveform и полный аудио-анализ появятся здесь.",
                 )
             )
         else:
@@ -1590,7 +1590,7 @@ class DJMakerUI(PlaylistUI):
                 self._library_batch_controls(),
                 self.busy,
                 ft.Button(
-                    content="BPM / Key",
+                    content="Полный анализ",
                     icon=ft.Icons.SPEED,
                     on_click=self._start_audio_analysis,
                 ),
@@ -2475,12 +2475,14 @@ class DJMakerUI(PlaylistUI):
         self._set_navigation_index(4)
         try:
             total, analyzed = self.service.analysis_counts()
+            grid_total, grid_analyzed = self.service.beat_grid_counts()
             waveform_total, waveform_analyzed = self.service.waveform_counts()
         except RuntimeError as exc:
             self._notify(str(exc))
             return
 
         pending = max(0, total - analyzed)
+        grid_pending = max(0, grid_total - grid_analyzed)
         waveform_pending = max(0, waveform_total - waveform_analyzed)
         analysis_card = self._surface_card(
             ft.Column(
@@ -2491,7 +2493,7 @@ class DJMakerUI(PlaylistUI):
                             ft.Column(
                                 controls=[
                                     ft.Text(
-                                        "BPM / Key / Camelot",
+                                        "Полный анализ: BPM / сетка / Key / Camelot",
                                         weight=ft.FontWeight.BOLD,
                                     ),
                                     ft.Text(
@@ -2505,7 +2507,9 @@ class DJMakerUI(PlaylistUI):
                                 spacing=2,
                             ),
                             ft.Text(
-                                f"Готово: {analyzed}/{total} · в очереди: {pending}",
+                                f"BPM/Key: {analyzed}/{total} · "
+                                f"сетка: {grid_analyzed}/{grid_total} · "
+                                f"в очереди: {max(pending, grid_pending)}",
                                 size=COMPACT_UI.font_xs,
                             ),
                         ]
@@ -2529,7 +2533,8 @@ class DJMakerUI(PlaylistUI):
                         spacing=COMPACT_UI.space_sm,
                     ),
                     ft.Text(
-                        "Результат хранится отдельно от тегов файла: BPM, обычная "
+                        "Результат хранится отдельно от тегов: точный BPM, все "
+                        "обнаруженные доли, первая сильная доля, стабильность темпа, "
                         "тональность, лад, Camelot и confidence Essentia.",
                         size=COMPACT_UI.font_xs,
                         color=ft.Colors.ON_SURFACE_VARIANT,
@@ -2633,14 +2638,14 @@ class DJMakerUI(PlaylistUI):
         existing = self.tasks.active_for_kind(TaskKind.AUDIO_ANALYSIS)
         if existing is not None:
             self._notify(
-                "BPM / Key уже выполняется или остановлен. "
+                "Полный аудио-анализ уже выполняется или остановлен. "
                 "Откройте «Задачи» для управления."
             )
             return
 
         task = self.tasks.create(
             kind=TaskKind.AUDIO_ANALYSIS,
-            title="BPM / Key анализ",
+            title="Полный анализ BPM / сетка / Key",
             detail="Подготовка FFmpeg и Essentia...",
         )
         self._audio_task_contexts[task.id] = _AudioTaskContext(force=force)
@@ -2680,7 +2685,7 @@ class DJMakerUI(PlaylistUI):
                 context.labels = {track.id: str(track.path) for track in tracks}
                 task.set_progress(
                     total=len(tracks),
-                    detail="Очередь BPM / Key подготовлена",
+                    detail="Очередь полного аудио-анализа подготовлена",
                 )
 
             pending_ids = context.pending_ids
@@ -2697,7 +2702,7 @@ class DJMakerUI(PlaylistUI):
                 len(pending_ids),
             )
             task.set_progress(
-                detail=f"BPM / Key · потоков: {parallelism}"
+                detail=f"BPM / сетка / Key · потоков: {parallelism}"
             )
             self.analysis_progress_text.value = (
                 f"{task.snapshot().completed}/{total} · потоков: {parallelism}"
@@ -2730,7 +2735,7 @@ class DJMakerUI(PlaylistUI):
 
                 snapshot = task.snapshot()
                 self.status.value = (
-                    f"BPM / Key: {snapshot.completed}/{total} · "
+                    f"BPM / сетка / Key: {snapshot.completed}/{total} · "
                     f"потоков: {parallelism}"
                 )
                 self.analysis_progress.value = snapshot.progress or 0
@@ -2742,10 +2747,10 @@ class DJMakerUI(PlaylistUI):
             if task.cancel_requested:
                 task.mark_cancelled()
                 self._forget_task_context(task_id)
-                self._notify("BPM / Key анализ отменён")
+                self._notify("Полный аудио-анализ отменён")
             elif task.pause_requested:
                 task.mark_paused("Остановлено · можно продолжить")
-                self._notify("BPM / Key анализ остановлен")
+                self._notify("Полный аудио-анализ остановлен")
             else:
                 snapshot = task.snapshot()
                 task.mark_completed(
@@ -2763,16 +2768,16 @@ class DJMakerUI(PlaylistUI):
                     self.show_audio_modules()
         except TaskPaused:
             task.mark_paused("Остановлено · можно продолжить")
-            self._notify("BPM / Key анализ остановлен")
+            self._notify("Полный аудио-анализ остановлен")
         except TaskCancelled:
             task.mark_cancelled()
             self._forget_task_context(task_id)
-            self._notify("BPM / Key анализ отменён")
+            self._notify("Полный аудио-анализ отменён")
         except Exception as exc:
             LOGGER.exception("Ошибка пакетного аудио-анализа")
             task.mark_failed(exc)
             self._forget_task_context(task_id)
-            self._notify(f"Не удалось выполнить BPM / Key анализ: {exc}")
+            self._notify(f"Не удалось выполнить полный аудио-анализ: {exc}")
         finally:
             snapshot = task.snapshot()
             running = snapshot.status in {
@@ -2943,6 +2948,8 @@ class DJMakerUI(PlaylistUI):
         parts = [bpm, key or "—"]
         if analysis.camelot:
             parts.append(analysis.camelot)
+        if analysis.beat_grid is not None:
+            parts.append(f"сетка {len(analysis.beat_grid.beat_ticks_ms)} долей")
         return " · ".join(parts)
 
     async def ensure_embedded_artwork(self) -> None:

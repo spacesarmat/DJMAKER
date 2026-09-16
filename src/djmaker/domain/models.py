@@ -33,8 +33,23 @@ class AudioTechnicalInfo:
 
 
 @dataclass(slots=True)
+class BeatGridAnalysis:
+    """Автоматическая постоянная музыкальная сетка всего трека."""
+
+    bpm: float
+    first_beat_ms: int
+    downbeat_ms: int
+    beats_per_bar: int = 4
+    beat_ticks_ms: tuple[int, ...] = ()
+    tempo_stability: float | None = None
+    downbeat_confidence: float | None = None
+    source: str = "auto"
+    analyzed_at: str = ""
+
+
+@dataclass(slots=True)
 class AudioAnalysis:
-    """Результат DSP-анализа трека через FFmpeg + Essentia."""
+    """Результат полного DSP-анализа через FFmpeg + Essentia."""
 
     bpm: float | None = None
     bpm_confidence: float | None = None
@@ -43,6 +58,7 @@ class AudioAnalysis:
     key_strength: float | None = None
     camelot: str = ""
     analyzed_at: str = ""
+    beat_grid: BeatGridAnalysis | None = None
 
 
 @dataclass(slots=True)

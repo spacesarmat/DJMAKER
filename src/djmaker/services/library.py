@@ -13,6 +13,7 @@ from djmaker.domain.models import (
     ScanStats,
     TrackRecord,
 )
+from djmaker.infrastructure.beat_grid import BeatGridRepository
 from djmaker.infrastructure.database import LibraryDatabase
 from djmaker.infrastructure.playlists import PlaylistRepository
 from djmaker.infrastructure.set_timeline import SetTimelineRepository
@@ -61,6 +62,10 @@ class LibraryService:
     @property
     def set_timeline(self) -> SetTimelineRepository:
         return SetTimelineRepository(self.database)
+
+    @property
+    def beat_grid(self) -> BeatGridRepository:
+        return BeatGridRepository(self.database)
 
     def scan_folder(
         self,
@@ -125,6 +130,10 @@ class LibraryService:
     def analysis_counts(self) -> tuple[int, int]:
         """Возвращает (всего треков, проанализировано)."""
         return self.database.analysis_counts()
+
+    def beat_grid_counts(self) -> tuple[int, int]:
+        """Возвращает (всего треков, полный анализ сетки завершён)."""
+        return self.database.beat_grid_counts()
 
     def tracks_for_analysis(self, *, force: bool = False) -> list[TrackRecord]:
         """Возвращает очередь треков для BPM/Key анализа."""

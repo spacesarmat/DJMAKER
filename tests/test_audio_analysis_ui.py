@@ -1,4 +1,4 @@
-"""Регрессия пакетного многопоточного BPM/Key анализа в UI."""
+"""Регрессия пакетного полного BPM/grid/Key анализа в UI."""
 
 from __future__ import annotations
 
@@ -18,6 +18,13 @@ class AudioAnalysisUITests(unittest.TestCase):
         self.assertIn("self.workers.run_many_unordered(", source)
         self.assertIn("max_concurrency=parallelism", source)
         self.assertIn("потоков: {parallelism}", source)
+
+    def test_full_analysis_screen_reports_grid_progress(self) -> None:
+        source = APP_SOURCE.read_text(encoding="utf-8")
+
+        self.assertIn("beat_grid_counts()", source)
+        self.assertIn("Полный анализ: BPM / сетка / Key / Camelot", source)
+        self.assertIn("сетка: {grid_analyzed}/{grid_total}", source)
 
 
 if __name__ == "__main__":

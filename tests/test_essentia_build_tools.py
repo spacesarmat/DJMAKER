@@ -50,7 +50,7 @@ class EssentiaBuildToolsTests(unittest.TestCase):
             PROJECT_ROOT / ".github" / "workflows" / "build-essentia-runtime.yml"
         ).read_text(encoding="utf-8")
 
-        self.assertIn("ESSENTIA_RUNTIME_VERSION: 2026.08.27-66a890f2-r5", workflow)
+        self.assertIn("ESSENTIA_RUNTIME_VERSION: 2026.08.27-66a890f2-r6", workflow)
         self.assertIn(
             "EIGEN_COMMIT: 3147391d946bb4b6c68edd901f2add6ac1f31f8c",
             workflow,
@@ -147,6 +147,17 @@ class EssentiaBuildToolsTests(unittest.TestCase):
         self.assertIn("djmaker-essentia/djmaker_essentia_analyzer.cpp", names)
         self.assertEqual("amd64", manifest["arch"])
         self.assertEqual("test-r1", manifest["runtime_version"])
+
+    def test_bridge_emits_full_beat_grid_payload(self) -> None:
+        source = (
+            PROJECT_ROOT / "tools" / "essentia" / "djmaker_essentia_analyzer.cpp"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('\\"beat_ticks\\"', source)
+        self.assertIn('\\"first_downbeat\\"', source)
+        self.assertIn('\\"tempo_stability\\"', source)
+        self.assertIn('\\"downbeat_confidence\\"', source)
+        self.assertIn("estimate_downbeat", source)
 
 
 if __name__ == "__main__":

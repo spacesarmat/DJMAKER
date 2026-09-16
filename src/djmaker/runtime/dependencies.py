@@ -38,7 +38,7 @@ FFMPEG_RELEASE_BASE = "https://github.com/binmgr/ffmpeg/releases/latest/download
 FFMPEG_CHECKSUMS_URL = f"{FFMPEG_RELEASE_BASE}/SHA256SUMS.txt"
 
 ESSENTIA_UPSTREAM_SHA = "66a890f285d0e1988155c12d17a2068e406cdd90"
-ESSENTIA_RUNTIME_VERSION = "2026.08.27-66a890f2-r5"
+ESSENTIA_RUNTIME_VERSION = "2026.08.27-66a890f2-r6"
 ESSENTIA_RELEASE_TAG = f"essentia-runtime-v{ESSENTIA_RUNTIME_VERSION}"
 ESSENTIA_RELEASE_BASE = (
     "https://github.com/spacesarmat/DJMAKER/releases/download/"
@@ -116,8 +116,8 @@ class RuntimeDependencies:
 
     def essentia_analyzer_path(self) -> Path | None:
         """Возвращает путь к управляемому DSP bridge Essentia DJMAKER."""
-        candidate = self._managed_essentia_path()
-        return candidate if candidate.is_file() else None
+        status = self._probe_managed_essentia()
+        return Path(status.path) if status.available and status.path else None
 
     def essentia_executable(self, name: str = ESSENTIA_BINARY_BASENAME) -> Path | None:
         """Возвращает управляемый Essentia CLI; сохранено как совместимый API."""
@@ -282,11 +282,25 @@ class RuntimeDependencies:
                 backend="djmaker-cli",
                 detail=str(exc),
             )
+        version = _parse_essentia_version(first_line)
+        if version != ESSENTIA_RUNTIME_VERSION:
+            return DependencyStatus(
+                name="Essentia",
+                available=False,
+                managed=True,
+                version=version,
+                path=str(path),
+                backend="djmaker-cli",
+                detail=(
+                    f"Требуется обновление runtime: {version or 'неизвестно'} → "
+                    f"{ESSENTIA_RUNTIME_VERSION}"
+                ),
+            )
         return DependencyStatus(
             name="Essentia",
             available=True,
             managed=True,
-            version=_parse_essentia_version(first_line),
+            version=version,
             path=str(path),
             backend="djmaker-cli",
             detail=f"Собственная сборка · upstream {ESSENTIA_UPSTREAM_SHA[:8]}",

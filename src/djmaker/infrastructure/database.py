@@ -9,6 +9,7 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
+from djmaker.domain.beat_grid import BeatGridError, validate_beat_grid
 from djmaker.domain.library_sort import (
     DEFAULT_LIBRARY_SORT,
     LIBRARY_SORT_LABELS,
@@ -20,15 +21,17 @@ from djmaker.domain.models import (
     AudioAnalysis,
     AudioMetadata,
     AudioTechnicalInfo,
+    BeatGridAnalysis,
     DuplicateGroup,
     TrackRecord,
     WaveformAnalysis,
 )
+from djmaker.infrastructure.beat_grid import create_beat_grid_schema
 from djmaker.infrastructure.playlists import create_playlist_schema
 from djmaker.infrastructure.set_timeline import create_set_timeline_schema
 
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 
 class DatabaseError(RuntimeError):
@@ -55,6 +58,7 @@ class LibraryDatabase:
                     self._create_schema(conn)
                     create_playlist_schema(conn)
                     create_set_timeline_schema(conn)
+                    create_beat_grid_schema(conn)
                     conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
                     conn.commit()
                 else:
@@ -77,6 +81,9 @@ class LibraryDatabase:
                             conn.execute("BEGIN IMMEDIATE")
                         create_set_timeline_schema(conn)
                         version = 6
+                    if version == 6:
+                        self._migrate_v6_to_v7(conn)
+                        version = 7
                     conn.execute(f"PRAGMA user_version={version}")
                     conn.commit()
         except sqlite3.Error as exc:
@@ -158,6 +165,8 @@ class LibraryDatabase:
                 embedded_artwork_checked INTEGER NOT NULL DEFAULT 0,
                 waveform_peaks TEXT,
                 waveform_analyzed_at TEXT,
+                beat_grid_json TEXT,
+                beat_grid_analyzed_at TEXT,
                 scan_token TEXT NOT NULL DEFAULT '',
                 added_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
@@ -215,6 +224,20 @@ class LibraryDatabase:
             ALTER TABLE tracks ADD COLUMN waveform_analyzed_at TEXT;
             """
         )
+
+    @staticmethod
+    def _migrate_v6_to_v7(conn: sqlite3.Connection) -> None:
+        """Добавляет полную BPM-сетку и будущие Warp-якоря."""
+        if not conn.in_transaction:
+            conn.execute("BEGIN IMMEDIATE")
+        columns = {
+            str(row[1]) for row in conn.execute("PRAGMA table_info(tracks)").fetchall()
+        }
+        if "beat_grid_json" not in columns:
+            conn.execute("ALTER TABLE tracks ADD COLUMN beat_grid_json TEXT")
+        if "beat_grid_analyzed_at" not in columns:
+            conn.execute("ALTER TABLE tracks ADD COLUMN beat_grid_analyzed_at TEXT")
+        create_beat_grid_schema(conn)
 
     @staticmethod
     def _now() -> str:
@@ -396,6 +419,14 @@ class LibraryDatabase:
                             WHEN tracks.file_hash=excluded.file_hash
                             THEN tracks.waveform_analyzed_at
                             ELSE NULL END,
+                        beat_grid_json=CASE
+                            WHEN tracks.file_hash=excluded.file_hash
+                            THEN tracks.beat_grid_json
+                            ELSE NULL END,
+                        beat_grid_analyzed_at=CASE
+                            WHEN tracks.file_hash=excluded.file_hash
+                            THEN tracks.beat_grid_analyzed_at
+                            ELSE NULL END,
                         scan_token=excluded.scan_token,
                         updated_at=excluded.updated_at,
                         last_scanned_at=excluded.last_scanned_at
@@ -555,6 +586,20 @@ class LibraryDatabase:
             raise DatabaseError(f"Не удалось получить статистику аудио-анализа: {exc}") from exc
         return int(row["total"]), int(row["analyzed"])
 
+    def beat_grid_counts(self) -> tuple[int, int]:
+        """Возвращает число треков и число завершённых анализов сетки."""
+        try:
+            with self.connection() as conn:
+                row = conn.execute(
+                    "SELECT COUNT(*) AS total, "
+                    "SUM(CASE WHEN analyzed_at IS NOT NULL AND "
+                    "(analysis_bpm IS NULL OR beat_grid_analyzed_at IS NOT NULL) "
+                    "THEN 1 ELSE 0 END) AS analyzed FROM tracks"
+                ).fetchone()
+        except sqlite3.Error as exc:
+            raise DatabaseError(f"Не удалось получить статистику BPM-сетки: {exc}") from exc
+        return int(row["total"]), int(row["analyzed"] or 0)
+
     def find_exact_duplicates(self) -> list[DuplicateGroup]:
         """Возвращает группы точных дубликатов по полному SHA-256."""
         try:
@@ -641,7 +686,12 @@ class LibraryDatabase:
 
     def list_tracks_for_analysis(self, *, force: bool = False) -> list[TrackRecord]:
         """Возвращает треки, которым нужен DSP-анализ, либо всю медиатеку."""
-        where = "" if force else "WHERE analyzed_at IS NULL"
+        where = (
+            ""
+            if force
+            else "WHERE analyzed_at IS NULL OR "
+            "(analysis_bpm IS NOT NULL AND beat_grid_analyzed_at IS NULL)"
+        )
         try:
             with self.connection() as conn:
                 rows = conn.execute(
@@ -652,8 +702,31 @@ class LibraryDatabase:
         return [self._row_to_track(row) for row in rows]
 
     def save_audio_analysis(self, track_id: int, analysis: AudioAnalysis) -> None:
-        """Сохраняет рассчитанные BPM/Key отдельно от редактируемых тегов."""
+        """Атомарно сохраняет BPM, Key и полную музыкальную сетку."""
         analyzed_at = analysis.analyzed_at or self._now()
+        grid_payload: str | None = None
+        grid_analyzed_at: str | None = None
+        if analysis.beat_grid is not None:
+            grid = analysis.beat_grid
+            try:
+                validate_beat_grid(grid)
+            except BeatGridError as exc:
+                raise DatabaseError(f"Некорректная BPM-сетка: {exc}") from exc
+            grid_payload = json.dumps(
+                {
+                    "bpm": round(float(grid.bpm), 8),
+                    "first_beat_ms": grid.first_beat_ms,
+                    "downbeat_ms": grid.downbeat_ms,
+                    "beats_per_bar": grid.beats_per_bar,
+                    "beat_ticks_ms": list(grid.beat_ticks_ms),
+                    "tempo_stability": grid.tempo_stability,
+                    "downbeat_confidence": grid.downbeat_confidence,
+                    "source": grid.source,
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            grid_analyzed_at = grid.analyzed_at or analyzed_at
         try:
             with self.connection() as conn:
                 cursor = conn.execute(
@@ -661,7 +734,8 @@ class LibraryDatabase:
                     UPDATE tracks SET
                         analysis_bpm=?, analysis_bpm_confidence=?,
                         analysis_key=?, analysis_scale=?, analysis_key_strength=?,
-                        analysis_camelot=?, analyzed_at=?, updated_at=?
+                        analysis_camelot=?, analyzed_at=?,
+                        beat_grid_json=?, beat_grid_analyzed_at=?, updated_at=?
                     WHERE id=?
                     """,
                     (
@@ -672,6 +746,8 @@ class LibraryDatabase:
                         analysis.key_strength,
                         analysis.camelot,
                         analyzed_at,
+                        grid_payload,
+                        grid_analyzed_at,
                         self._now(),
                         track_id,
                     ),
@@ -831,6 +907,7 @@ class LibraryDatabase:
                     key_strength=row["analysis_key_strength"],
                     camelot=str(row["analysis_camelot"] or ""),
                     analyzed_at=str(row["analyzed_at"] or ""),
+                    beat_grid=_beat_grid_from_row(row),
                 )
                 if row["analyzed_at"] is not None
                 else None
@@ -847,3 +924,36 @@ class LibraryDatabase:
                 else None
             ),
         )
+
+
+def _beat_grid_from_row(row: sqlite3.Row) -> BeatGridAnalysis | None:
+    """Восстанавливает сетку из SQLite; повреждённая сетка требует переанализа."""
+    payload = row["beat_grid_json"]
+    analyzed_at = row["beat_grid_analyzed_at"]
+    if not payload or not analyzed_at:
+        return None
+    try:
+        data = json.loads(payload)
+        ticks = tuple(int(value) for value in data.get("beat_ticks_ms", ()))
+        grid = BeatGridAnalysis(
+            bpm=float(data["bpm"]),
+            first_beat_ms=int(data["first_beat_ms"]),
+            downbeat_ms=int(data["downbeat_ms"]),
+            beats_per_bar=int(data.get("beats_per_bar", 4)),
+            beat_ticks_ms=ticks,
+            tempo_stability=(
+                float(data["tempo_stability"])
+                if data.get("tempo_stability") is not None
+                else None
+            ),
+            downbeat_confidence=(
+                float(data["downbeat_confidence"])
+                if data.get("downbeat_confidence") is not None
+                else None
+            ),
+            source=str(data.get("source") or "auto"),
+            analyzed_at=str(analyzed_at),
+        )
+        return validate_beat_grid(grid)
+    except (BeatGridError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return None

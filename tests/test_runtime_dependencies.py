@@ -56,7 +56,7 @@ class RuntimeDependencyHelpersTests(unittest.TestCase):
 
     def test_essentia_runtime_revision_matches_build_recipe(self) -> None:
         self.assertEqual(
-            "2026.08.27-66a890f2-r5",
+            "2026.08.27-66a890f2-r6",
             ESSENTIA_RUNTIME_VERSION,
         )
 
@@ -124,6 +124,24 @@ class RuntimeDependenciesTests(unittest.TestCase):
 
             self.assertTrue(status.available)
             self.assertEqual("python-fallback", status.backend)
+
+    def test_stale_managed_runtime_is_rejected_for_grid_analysis(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            runtime = RuntimeDependencies(Path(temp))
+            binary = runtime._managed_essentia_path()
+            binary.parent.mkdir(parents=True)
+            binary.write_bytes(b"placeholder")
+
+            with patch(
+                "djmaker.runtime.dependencies._run_version_command",
+                return_value="djmaker-essentia 2026.08.27-66a890f2-r5 upstream=x",
+            ):
+                status = runtime._probe_managed_essentia()
+
+            self.assertFalse(status.available)
+            self.assertIn("r5", status.detail)
+            self.assertIn("r6", status.detail)
+            self.assertIsNone(runtime.essentia_analyzer_path())
 
 
 if __name__ == "__main__":
