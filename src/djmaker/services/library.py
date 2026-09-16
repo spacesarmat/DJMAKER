@@ -15,6 +15,7 @@ from djmaker.domain.models import (
 )
 from djmaker.infrastructure.database import LibraryDatabase
 from djmaker.infrastructure.playlists import PlaylistRepository
+from djmaker.infrastructure.set_timeline import SetTimelineRepository
 from djmaker.plugins.registry import PluginRegistry
 from djmaker.services.audio_analysis import EssentiaAudioAnalyzer
 from djmaker.services.artwork import ArtworkCache
@@ -56,6 +57,10 @@ class LibraryService:
     @property
     def playlists(self) -> PlaylistRepository:
         return PlaylistRepository(self.database)
+
+    @property
+    def set_timeline(self) -> SetTimelineRepository:
+        return SetTimelineRepository(self.database)
 
     def scan_folder(
         self,

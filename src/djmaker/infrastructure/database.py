@@ -25,9 +25,10 @@ from djmaker.domain.models import (
     WaveformAnalysis,
 )
 from djmaker.infrastructure.playlists import create_playlist_schema
+from djmaker.infrastructure.set_timeline import create_set_timeline_schema
 
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 class DatabaseError(RuntimeError):
@@ -53,6 +54,7 @@ class LibraryDatabase:
                 if version == 0:
                     self._create_schema(conn)
                     create_playlist_schema(conn)
+                    create_set_timeline_schema(conn)
                     conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
                     conn.commit()
                 else:
@@ -70,6 +72,11 @@ class LibraryDatabase:
                             conn.execute("BEGIN IMMEDIATE")
                         create_playlist_schema(conn)
                         version = 5
+                    if version == 5:
+                        if not conn.in_transaction:
+                            conn.execute("BEGIN IMMEDIATE")
+                        create_set_timeline_schema(conn)
+                        version = 6
                     conn.execute(f"PRAGMA user_version={version}")
                     conn.commit()
         except sqlite3.Error as exc:

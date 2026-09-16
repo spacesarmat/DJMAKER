@@ -229,7 +229,7 @@ class LibraryDatabaseTests(unittest.TestCase):
         self.assertEqual((0, 0), self.db.waveform_counts())
         with self.db.connection() as conn:
             self.assertEqual(
-                5,
+                6,
                 conn.execute("PRAGMA user_version").fetchone()[0],
             )
 
@@ -285,7 +285,7 @@ class LibraryDatabaseMigrationTests(unittest.TestCase):
                     for row in conn.execute("PRAGMA table_info(tracks)").fetchall()
                 }
 
-            self.assertEqual(5, version)
+            self.assertEqual(6, version)
             self.assertIn("analysis_bpm", columns)
             self.assertIn("analysis_key", columns)
             self.assertIn("analysis_camelot", columns)
@@ -314,7 +314,7 @@ class LibraryDatabaseMigrationTests(unittest.TestCase):
                     for row in conn.execute("PRAGMA table_info(tracks)").fetchall()
                 }
 
-            self.assertEqual(5, version)
+            self.assertEqual(6, version)
             self.assertIn("embedded_artwork_path", columns)
             self.assertIn("embedded_artwork_checked", columns)
             self.assertIn("waveform_peaks", columns)
@@ -338,7 +338,7 @@ class LibraryDatabaseMigrationTests(unittest.TestCase):
                     for row in conn.execute("PRAGMA table_info(tracks)").fetchall()
                 }
 
-            self.assertEqual(5, version)
+            self.assertEqual(6, version)
             self.assertIn("waveform_peaks", columns)
             self.assertIn("waveform_analyzed_at", columns)
 

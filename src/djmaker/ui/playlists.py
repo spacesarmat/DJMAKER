@@ -12,12 +12,29 @@ from djmaker.domain.set_planner import (
     DEFAULT_MATCH_MODE,
     MATCH_MODE_LABELS,
     recommend_tracks,
+    track_bpm,
+)
+from djmaker.domain.set_timeline import (
+    ALLOWED_BARS_PER_SQUARE,
+    ALLOWED_SQUARE_COUNTS,
+    SetTimelineError,
+    build_transition_plan,
+    move_by_beats,
+    snap_to_beat,
 )
 from djmaker.infrastructure.playlists import Playlist, PlaylistError
+from djmaker.infrastructure.set_timeline import (
+    SavedTransition,
+    SetTimelineRepositoryError,
+)
 from djmaker.services.playlist_export import (
     ExportTrack,
     PlaylistExportRequest,
     export_playlist,
+)
+from djmaker.services.transition_preview import (
+    TransitionPreviewError,
+    render_transition_preview,
 )
 from djmaker.services.tasks import TaskCancelled, TaskKind, TaskPaused, TaskStatus
 from djmaker.ui.density import COMPACT_UI
@@ -210,6 +227,12 @@ class PlaylistUI:
                     icon=ft.Icons.AUTO_AWESOME,
                     disabled=not tracks,
                     on_click=lambda _: self._open_set_recommendations(),
+                ),
+                ft.Button(
+                    content="Монтаж переходов",
+                    icon=ft.Icons.MULTILINE_CHART,
+                    disabled=len(tracks) < 2,
+                    on_click=lambda _: self._open_transition_editor(),
                 ),
             ],
             wrap=True,
@@ -703,6 +726,449 @@ class PlaylistUI:
         )
         self.page.show_dialog(dialog)
         render()
+
+    @staticmethod
+    def _transition_track_title(track: TrackRecord) -> str:
+        return (
+            " - ".join(filter(None, (track.metadata.artist, track.metadata.title)))
+            or track.path.stem
+        )
+
+    def _transition_waveform_control(
+        self,
+        track: TrackRecord,
+        cue_ms: int,
+        bpm: float,
+        bars_per_square: int,
+        anchor_ms: int,
+        on_tap: object,
+    ) -> ft.Control:
+        """Рисует waveform, границы квадратов и текущую монтажную точку."""
+        width = 820.0
+        height = 76.0
+        duration_ms = max(1, round((track.technical.duration or 0) * 1000))
+        peaks = list(track.waveform.peaks if track.waveform else ())
+        if not peaks:
+            peaks = [0.08] * COMPACT_UI.waveform_bar_count
+        controls: list[ft.Control] = [
+            ft.Image(
+                src=self._waveform_svg(tuple(peaks)),
+                width=width,
+                height=height,
+                fit=ft.BoxFit.FILL,
+                color=ft.Colors.ON_SURFACE_VARIANT,
+                exclude_from_semantics=True,
+            )
+        ]
+        square_ms = bars_per_square * 4 * 60_000 / bpm
+        first_index = int(-anchor_ms // square_ms) - 1
+        last_index = int((duration_ms - anchor_ms) // square_ms) + 1
+        for index in range(first_index, last_index + 1):
+            position_ms = anchor_ms + index * square_ms
+            if 0 <= position_ms <= duration_ms:
+                controls.append(
+                    ft.Container(
+                        left=position_ms / duration_ms * width,
+                        width=2,
+                        height=height,
+                        bgcolor=ft.Colors.PRIMARY_CONTAINER,
+                    )
+                )
+        controls.append(
+            ft.Container(
+                left=min(width - 3, max(0, cue_ms / duration_ms * width)),
+                width=3,
+                height=height,
+                bgcolor=ft.Colors.PRIMARY,
+            )
+        )
+        return ft.GestureDetector(
+            content=ft.Stack(controls=controls, width=width, height=height),
+            on_tap=on_tap,
+            mouse_cursor=ft.MouseCursor.CLICK,
+        )
+
+    def _open_transition_editor(self, pair_index: int = 0) -> None:
+        """Открывает монтаж соседней пары треков на общей музыкальной сетке."""
+        playlist_id = self._selected_playlist_id
+        if playlist_id is None:
+            return
+        try:
+            tracks = self.service.playlists.tracks(playlist_id)
+        except PlaylistError as exc:
+            self._notify(str(exc))
+            return
+        if len(tracks) < 2:
+            self._notify("Для монтажа перехода нужны минимум два трека")
+            return
+        pair_index = min(max(0, pair_index), len(tracks) - 2)
+        outgoing = tracks[pair_index]
+        incoming = tracks[pair_index + 1]
+        outgoing_bpm = track_bpm(outgoing)
+        incoming_bpm = track_bpm(incoming)
+        if outgoing_bpm is None or incoming_bpm is None:
+            self._notify("Для монтажа сначала определите BPM обоих треков")
+            return
+        try:
+            repository = self.service.set_timeline
+            saved = repository.transition(playlist_id, outgoing.id, incoming.id)
+            outgoing_hot_cues = {
+                item.slot: item.position_ms
+                for item in repository.cue_points(outgoing.id)
+            }
+            incoming_hot_cues = {
+                item.slot: item.position_ms
+                for item in repository.cue_points(incoming.id)
+            }
+        except SetTimelineRepositoryError as exc:
+            self._notify(str(exc))
+            return
+
+        bars_per_square = saved.bars_per_square if saved else 8
+        square_count = saved.square_count if saved else 1
+        provisional_overlap_ms = round(
+            bars_per_square * 4 * square_count * 60_000 / outgoing_bpm
+        )
+        outgoing_duration_ms = round((outgoing.technical.duration or 0) * 1000)
+        incoming_duration_ms = round((incoming.technical.duration or 0) * 1000)
+        cue_positions = {
+            "outgoing": (
+                saved.outgoing_cue_ms
+                if saved
+                else max(0, outgoing_duration_ms - provisional_overlap_ms)
+            ),
+            "incoming": saved.incoming_cue_ms if saved else 0,
+        }
+
+        pair = ft.Dropdown(
+            label="Соседний переход",
+            width=560,
+            value=str(pair_index),
+            options=[
+                ft.DropdownOption(
+                    key=str(index),
+                    text=(
+                        f"{index + 1}. {self._transition_track_title(first)} → "
+                        f"{self._transition_track_title(second)}"
+                    ),
+                )
+                for index, (first, second) in enumerate(zip(tracks, tracks[1:]))
+            ],
+            on_select=lambda event: self._open_transition_editor(
+                int(getattr(event.control, "value", 0))
+            ),
+        )
+        bars = ft.Dropdown(
+            label="Тактов в квадрате",
+            width=190,
+            value=str(bars_per_square),
+            options=[
+                ft.DropdownOption(key=str(value), text=str(value))
+                for value in ALLOWED_BARS_PER_SQUARE
+            ],
+        )
+        squares = ft.Dropdown(
+            label="Квадратов наложения",
+            width=210,
+            value=str(square_count),
+            options=[
+                ft.DropdownOption(key=str(value), text=str(value))
+                for value in ALLOWED_SQUARE_COUNTS
+            ],
+        )
+        status = ft.Text(
+            "Клик по waveform ставит точку на ближайшую долю. Cue 1 — якорь сетки.",
+            size=COMPACT_UI.font_xs,
+            color=ft.Colors.ON_SURFACE_VARIANT,
+        )
+        preview_button = ft.Button(
+            content="Собрать и прослушать",
+            icon=ft.Icons.PLAY_CIRCLE_OUTLINE,
+        )
+
+        def anchor(hot_cues: dict[int, int]) -> int:
+            return hot_cues.get(1, 0)
+
+        def current_bars() -> int:
+            return int(bars.value or 8)
+
+        def waveform(track: TrackRecord, side: str) -> ft.Container:
+            bpm = outgoing_bpm if side == "outgoing" else incoming_bpm
+            hot_cues = outgoing_hot_cues if side == "outgoing" else incoming_hot_cues
+            holder = ft.Container()
+
+            def set_from_tap(event: object) -> None:
+                local_position = getattr(event, "local_position", None)
+                duration_ms = round((track.technical.duration or 0) * 1000)
+                if local_position is None or duration_ms <= 0:
+                    return
+                raw = round(
+                    min(1.0, max(0.0, local_position.x / 820.0)) * duration_ms
+                )
+                cue_positions[side] = snap_to_beat(
+                    raw, bpm, anchor_ms=anchor(hot_cues)
+                )
+                refresh_timeline()
+
+            holder.content = self._transition_waveform_control(
+                track,
+                cue_positions[side],
+                bpm,
+                current_bars(),
+                anchor(hot_cues),
+                set_from_tap,
+            )
+            return holder
+
+        outgoing_waveform = waveform(outgoing, "outgoing")
+        incoming_waveform = waveform(incoming, "incoming")
+        outgoing_position = ft.Text()
+        incoming_position = ft.Text()
+        outgoing_hot_row = ft.Row(wrap=True, spacing=4)
+        incoming_hot_row = ft.Row(wrap=True, spacing=4)
+
+        def save_hot_cue(side: str, slot: int) -> None:
+            track = outgoing if side == "outgoing" else incoming
+            hot_cues = outgoing_hot_cues if side == "outgoing" else incoming_hot_cues
+            try:
+                repository.save_cue_point(track.id, slot, cue_positions[side])
+            except SetTimelineRepositoryError as exc:
+                self._notify(str(exc))
+                return
+            hot_cues[slot] = cue_positions[side]
+            refresh_timeline()
+            self._notify(f"Cue {slot} сохранена")
+
+        def use_hot_cue(side: str, slot: int) -> None:
+            hot_cues = outgoing_hot_cues if side == "outgoing" else incoming_hot_cues
+            if slot in hot_cues:
+                cue_positions[side] = hot_cues[slot]
+                refresh_timeline()
+            else:
+                save_hot_cue(side, slot)
+
+        def hot_buttons(side: str, hot_cues: dict[int, int]) -> list[ft.Control]:
+            controls: list[ft.Control] = []
+            for slot in range(1, 5):
+                position = hot_cues.get(slot)
+                label = (
+                    f"Cue {slot} · {self._format_duration(position / 1000)}"
+                    if position is not None
+                    else f"Записать Cue {slot}"
+                )
+                controls.append(
+                    ft.Button(
+                        content=label,
+                        icon=ft.Icons.BOOKMARK if position is not None else ft.Icons.ADD,
+                        on_click=lambda _, current=slot: use_hot_cue(side, current),
+                    )
+                )
+                controls.append(
+                    ft.IconButton(
+                        icon=ft.Icons.SAVE_OUTLINED,
+                        tooltip=f"Перезаписать Cue {slot} текущей точкой",
+                        on_click=lambda _, current=slot: save_hot_cue(side, current),
+                    )
+                )
+            return controls
+
+        def refresh_timeline(_: object | None = None) -> None:
+            outgoing_waveform.content = self._transition_waveform_control(
+                outgoing,
+                cue_positions["outgoing"],
+                outgoing_bpm,
+                current_bars(),
+                anchor(outgoing_hot_cues),
+                outgoing_waveform.content.on_tap,
+            )
+            incoming_waveform.content = self._transition_waveform_control(
+                incoming,
+                cue_positions["incoming"],
+                incoming_bpm,
+                current_bars(),
+                anchor(incoming_hot_cues),
+                incoming_waveform.content.on_tap,
+            )
+            outgoing_position.value = (
+                "Точка начала наложения: "
+                f"{self._format_duration(cue_positions['outgoing'] / 1000)}"
+            )
+            incoming_position.value = (
+                "Точка входа: "
+                f"{self._format_duration(cue_positions['incoming'] / 1000)}"
+            )
+            outgoing_hot_row.controls = hot_buttons("outgoing", outgoing_hot_cues)
+            incoming_hot_row.controls = hot_buttons("incoming", incoming_hot_cues)
+            self.page.update(
+                outgoing_waveform,
+                incoming_waveform,
+                outgoing_position,
+                incoming_position,
+                outgoing_hot_row,
+                incoming_hot_row,
+            )
+
+        def nudge(side: str, beats: int) -> None:
+            bpm = outgoing_bpm if side == "outgoing" else incoming_bpm
+            cue_positions[side] = move_by_beats(cue_positions[side], beats, bpm)
+            refresh_timeline()
+
+        def nudge_row(side: str) -> ft.Row:
+            return ft.Row(
+                controls=[
+                    ft.Button(content="−4 доли", on_click=lambda _: nudge(side, -4)),
+                    ft.Button(content="−1", on_click=lambda _: nudge(side, -1)),
+                    ft.Button(content="+1", on_click=lambda _: nudge(side, 1)),
+                    ft.Button(content="+4 доли", on_click=lambda _: nudge(side, 4)),
+                ],
+                spacing=4,
+            )
+
+        def plan_and_save() -> object:
+            plan = build_transition_plan(
+                outgoing_cue_ms=cue_positions["outgoing"],
+                incoming_cue_ms=cue_positions["incoming"],
+                outgoing_bpm=outgoing_bpm,
+                incoming_bpm=incoming_bpm,
+                outgoing_duration_ms=outgoing_duration_ms,
+                incoming_duration_ms=incoming_duration_ms,
+                bars_per_square=int(bars.value or 8),
+                square_count=int(squares.value or 1),
+            )
+            repository.save_transition(
+                SavedTransition(
+                    playlist_id=playlist_id,
+                    outgoing_track_id=outgoing.id,
+                    incoming_track_id=incoming.id,
+                    outgoing_cue_ms=cue_positions["outgoing"],
+                    incoming_cue_ms=cue_positions["incoming"],
+                    bars_per_square=plan.bars_per_square,
+                    square_count=plan.square_count,
+                )
+            )
+            return plan
+
+        def save(_: object) -> None:
+            try:
+                plan = plan_and_save()
+            except (SetTimelineError, SetTimelineRepositoryError) as exc:
+                status.value = str(exc)
+                status.color = ft.Colors.ERROR
+                self.page.update(status)
+                return
+            status.value = (
+                f"Сохранено · наложение {plan.overlap_ms / 1000:.1f} с · "
+                f"входящий темп ×{plan.incoming_tempo:.4f}"
+            )
+            status.color = ft.Colors.PRIMARY
+            self.page.update(status)
+
+        async def preview() -> None:
+            try:
+                plan = plan_and_save()
+                ffmpeg = self.runtime.ffmpeg_path()
+                if ffmpeg is None:
+                    raise TransitionPreviewError("FFmpeg недоступен")
+                preview_button.disabled = True
+                preview_button.content = "Собирается preview…"
+                self.page.update(preview_button)
+                output = await self.workers.run(
+                    render_transition_preview,
+                    ffmpeg,
+                    outgoing.path,
+                    incoming.path,
+                    self.paths.data_dir / "transition_previews",
+                    plan,
+                )
+                await self._play_external_audio(
+                    output,
+                    f"Переход: {self._transition_track_title(outgoing)} → "
+                    f"{self._transition_track_title(incoming)}",
+                )
+                status.value = "Preview готов и воспроизводится"
+                status.color = ft.Colors.PRIMARY
+            except (
+                SetTimelineError,
+                SetTimelineRepositoryError,
+                TransitionPreviewError,
+            ) as exc:
+                status.value = str(exc)
+                status.color = ft.Colors.ERROR
+            finally:
+                preview_button.disabled = False
+                preview_button.content = "Собрать и прослушать"
+                self.page.update(preview_button, status)
+
+        bars.on_select = refresh_timeline
+        preview_button.on_click = lambda _: self.page.run_task(preview)
+        outgoing_block = self._surface_card(
+            ft.Column(
+                controls=[
+                    ft.Text(
+                        f"A · {self._transition_track_title(outgoing)} · "
+                        f"{outgoing_bpm:.2f} BPM",
+                        weight=ft.FontWeight.BOLD,
+                    ),
+                    outgoing_waveform,
+                    outgoing_position,
+                    nudge_row("outgoing"),
+                    outgoing_hot_row,
+                ],
+                spacing=6,
+            ),
+            padding=10,
+        )
+        incoming_block = self._surface_card(
+            ft.Column(
+                controls=[
+                    ft.Text(
+                        f"B · {self._transition_track_title(incoming)} · "
+                        f"{incoming_bpm:.2f} BPM → {outgoing_bpm:.2f} BPM",
+                        weight=ft.FontWeight.BOLD,
+                    ),
+                    incoming_waveform,
+                    incoming_position,
+                    nudge_row("incoming"),
+                    incoming_hot_row,
+                ],
+                spacing=6,
+            ),
+            padding=10,
+        )
+        toolbar = ft.Row(
+            controls=[
+                ft.Button(
+                    content="К плейлистам",
+                    icon=ft.Icons.ARROW_BACK,
+                    on_click=lambda _: self.show_playlists(local_update=True),
+                ),
+                pair,
+                bars,
+                squares,
+            ],
+            wrap=True,
+        )
+        actions = ft.Row(
+            controls=[
+                ft.Button(content="Сохранить", icon=ft.Icons.SAVE, on_click=save),
+                preview_button,
+                status,
+            ],
+            wrap=True,
+        )
+        self._replace_content(
+            "Монтаж переходов",
+            "Соседние треки, быстрые Cue и привязка к музыкальным квадратам",
+            toolbar,
+            actions,
+            ft.ListView(
+                controls=[outgoing_block, incoming_block],
+                expand=True,
+                spacing=COMPACT_UI.space_sm,
+            ),
+            local_update=True,
+        )
+        refresh_timeline()
 
     async def _start_playlist_export(self, copy_files: bool) -> None:
         playlist_id = self._selected_playlist_id

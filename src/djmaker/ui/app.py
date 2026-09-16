@@ -448,7 +448,11 @@ class DJMakerUI(PlaylistUI):
         track: TrackRecord,
     ) -> tuple[fta.Audio, bool, bool]:
         """Лениво создаёт Audio service и сообщает о смене source."""
-        source = track.path.expanduser().resolve()
+        return self._ensure_audio_path(track.path)
+
+    def _ensure_audio_path(self, path: Path) -> tuple[fta.Audio, bool, bool]:
+        """Подключает обычный трек или созданный локальный preview."""
+        source = path.expanduser().resolve()
         created = self.audio is None
         source_changed = created or self._player_track_path != source
         if self.audio is None:
@@ -467,6 +471,79 @@ class DJMakerUI(PlaylistUI):
             self.audio.src = str(source)
             self._player_track_path = source
         return self.audio, source_changed, created
+
+    async def _play_external_audio(self, source: Path, title: str) -> None:
+        """Воспроизводит локальный preview без добавления его в медиатеку."""
+        self._player_request_revision += 1
+        request_revision = self._player_request_revision
+        started_switch = False
+        try:
+            if not source.is_file():
+                raise RuntimeError(f"Файл не найден: {source}")
+            async with self._player_switch_lock:
+                started_switch = True
+                self._player_switching = True
+                if self.audio is not None:
+                    try:
+                        await self.audio.pause()
+                    except Exception:
+                        LOGGER.debug("Не удалось остановить предыдущий source", exc_info=True)
+                if request_revision != self._player_request_revision:
+                    return
+                self._player_load_event = asyncio.Event()
+                audio, source_changed, audio_created = self._ensure_audio_path(source)
+                if audio_created:
+                    self.page.update()
+                elif source_changed:
+                    audio.update()
+                else:
+                    self._player_load_event.set()
+                await asyncio.wait_for(
+                    self._player_load_event.wait(),
+                    timeout=_PLAYER_SOURCE_LOAD_TIMEOUT_SECONDS,
+                )
+                if request_revision != self._player_request_revision:
+                    return
+                duration = await asyncio.wait_for(
+                    audio.get_duration(),
+                    timeout=_PLAYER_SOURCE_LOAD_TIMEOUT_SECONDS,
+                )
+                previous_track_id = self._player_track_id
+                self._player_track_id = None
+                self._player_position_ms = 0
+                self._player_duration_ms = (
+                    max(0, duration.in_milliseconds) if duration is not None else 0
+                )
+                self._player_state = fta.AudioState.STOPPED
+                self.player_title.value = title
+                self.player_bar.visible = True
+                self._refresh_player_controls()
+                controls: list[ft.Control] = [
+                    self.player_bar,
+                    self.player_title,
+                    self.player_play_button,
+                    self.player_position,
+                    self.player_progress,
+                ]
+                if previous_track_id is not None:
+                    waveform = self._paint_waveform_progress(previous_track_id, 0.0)
+                    if waveform is not None:
+                        controls.append(waveform)
+                self._player_switching = False
+                self._player_load_event = None
+                started_switch = False
+                self.page.update(*controls)
+                await audio.play()
+        except TimeoutError:
+            LOGGER.error("Preview source не загрузился вовремя: %s", source)
+            self._notify("Плеер не успел загрузить preview перехода")
+        except Exception as exc:
+            LOGGER.exception("Не удалось воспроизвести preview %s", source)
+            self._notify(f"Не удалось воспроизвести переход: {exc}")
+        finally:
+            if started_switch:
+                self._player_switching = False
+                self._player_load_event = None
 
     async def _on_player_loaded(self, _: object) -> None:
         """Подтверждает готовность нового native audio source."""

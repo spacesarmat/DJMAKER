@@ -13,6 +13,7 @@ import flet as ft
 from djmaker.domain.models import AudioMetadata, AudioTechnicalInfo
 from djmaker.infrastructure.database import LibraryDatabase
 from djmaker.infrastructure.playlists import PlaylistRepository
+from djmaker.infrastructure.set_timeline import SetTimelineRepository
 from djmaker.services.tasks import TaskManager, TaskPaused, TaskStatus
 from djmaker.settings import AppSettings
 from djmaker.ui.app import DJMakerUI
@@ -48,6 +49,7 @@ class PlaylistUIFlowTests(unittest.IsolatedAsyncioTestCase):
         ui = self.ui = DJMakerUI.__new__(DJMakerUI)
         ui.service = SimpleNamespace(
             playlists=self.repo,
+            set_timeline=SetTimelineRepository(self.db),
             tracks=lambda search="", limit=10_000: self.db.list_tracks(
                 search=search, limit=limit
             ),
@@ -205,6 +207,25 @@ class PlaylistUIFlowTests(unittest.IsolatedAsyncioTestCase):
             [track.id for track in self.repo.tracks(playlist_id)], self.ids
         )
         self.assertIn("Рекомендации добавлены: 1", ui._notify.call_args.args[0])
+
+    def test_transition_editor_snaps_point_and_saves_adjacent_pair(self) -> None:
+        playlist_id = self.repo.create_with_tracks("Mix", self.ids)
+        self.ui._selected_playlist_id = playlist_id
+
+        self.ui._open_transition_editor()
+
+        toolbar, actions, timeline = self.ui.content.controls
+        self.assertEqual(toolbar.controls[1].value, "0")
+        outgoing_block = timeline.controls[0].content
+        gesture = outgoing_block.controls[1].content
+        gesture.on_tap(SimpleNamespace(local_position=SimpleNamespace(x=410.0)))
+        actions.controls[0].on_click(None)
+        saved = self.ui.service.set_timeline.transition(
+            playlist_id, self.ids[0], self.ids[1]
+        )
+        self.assertIsNotNone(saved)
+        self.assertGreater(saved.outgoing_cue_ms, 0)
+        self.assertIn("Сохранено", actions.controls[2].value)
 
     async def test_export_with_files_through_picker_and_task(self) -> None:
         self.create_through_dialog()
