@@ -33,6 +33,7 @@ from djmaker.runtime.dependencies import (
 from djmaker.services.audio_analysis import recommended_analysis_concurrency
 from djmaker.services.file_browser import reveal_file
 from djmaker.services.library import LibraryService
+from djmaker.services.playlist_export import PlaylistExportRequest
 from djmaker.services.tasks import (
     ManagedTask,
     TaskCancelled,
@@ -54,6 +55,7 @@ from djmaker.settings import (
     is_valid_theme_color,
 )
 from djmaker.ui.density import COMPACT_UI, scaled_library_size
+from djmaker.ui.playlists import PlaylistUI
 from djmaker.ui.scrolling import centered_scroll_offset
 from djmaker.ui.theme import (
     THEME_MODE_LABELS,
@@ -124,7 +126,7 @@ class _TagEditorArtworkState:
     artwork: EmbeddedArtwork | None = None
 
 
-class DJMakerUI:
+class DJMakerUI(PlaylistUI):
     """Связывает Flet-контролы с сервисным слоем приложения."""
 
     def __init__(
@@ -159,6 +161,8 @@ class DJMakerUI:
         self._selected_track_id: int | None = None
         self._library_viewport_extent = 0.0
         self._library_max_scroll_extent = 0.0
+        self._selected_playlist_id: int | None = None
+        self._playlist_export_contexts: dict[str, PlaylistExportRequest] = {}
         self._search_revision = 0
         self._theme_editor_active = False
         self._theme_editor_mode = self._initial_theme_editor_mode()
@@ -842,6 +846,10 @@ class DJMakerUI:
                     selected_icon=ft.Icons.SETTINGS,
                     label="Настройки",
                 ),
+                ft.NavigationRailDestination(
+                    icon=ft.Icons.QUEUE_MUSIC,
+                    label="Плейлисты",
+                ),
             ],
             on_change=self._on_navigation_change,
         )
@@ -857,6 +865,7 @@ class DJMakerUI:
             self.show_audio_modules,
             self.show_tasks,
             self.show_settings,
+            self.show_playlists,
         )
         if isinstance(index, int) and 0 <= index < len(handlers):
             handlers[index]()
@@ -1192,6 +1201,11 @@ class DJMakerUI:
             and task_id in self._waveform_task_contexts
         ):
             self.page.run_task(self._run_waveform_analysis, task_id)
+        elif (
+            snapshot.kind is TaskKind.PLAYLIST_EXPORT
+            and task_id in self._playlist_export_contexts
+        ):
+            self.page.run_task(self._run_playlist_export, task_id)
         else:
             task.mark_failed("Контекст задачи больше недоступен")
 
@@ -1199,6 +1213,7 @@ class DJMakerUI:
         self.show_tasks()
 
     def _forget_task_context(self, task_id: str) -> None:
+        self._playlist_export_contexts.pop(task_id, None)
         self._audio_task_contexts.pop(task_id, None)
         self._scan_task_paths.pop(task_id, None)
         self._drop_task_paths.pop(task_id, None)
@@ -1636,6 +1651,7 @@ class DJMakerUI:
                     self._track_artwork(track),
                     metadata_block,
                     self._track_waveform(track),
+                    self._playlist_track_menu(track.id),
                     ft.IconButton(
                         icon=ft.Icons.EDIT_OUTLINED,
                         icon_size=self._library_size(COMPACT_UI.action_icon_size),
@@ -3308,7 +3324,7 @@ class DJMakerUI:
                                         weight=ft.FontWeight.BOLD,
                                     ),
                                     ft.Text(
-                                        "Удаляет треки, папки, ошибки сканирования и "
+                                        "Удаляет треки, папки, плейлисты, ошибки сканирования и "
                                         "результаты анализа только из SQLite.",
                                         size=COMPACT_UI.font_micro,
                                         color=ft.Colors.ON_SURFACE_VARIANT,
@@ -3411,7 +3427,7 @@ class DJMakerUI:
                 controls=[
                     ft.Text(
                         "Будут удалены все записи медиатеки: музыкальные папки, "
-                        "индекс треков, результаты BPM/Key, waveform, ссылки на "
+                        "индекс треков, плейлисты, результаты BPM/Key, waveform, ссылки на "
                         "обложки и журнал ошибок сканирования."
                     ),
                     ft.Text(
@@ -3445,6 +3461,8 @@ class DJMakerUI:
 
     def _clear_library_runtime_state(self) -> None:
         """Сбрасывает UI-состояние, связанное с удалёнными записями БД."""
+        self._selected_playlist_id = None
+        self._playlist_export_contexts.clear()
         self._player_request_revision += 1
         self._selected_track_id = None
         self._player_track_id = None

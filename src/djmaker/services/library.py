@@ -14,6 +14,7 @@ from djmaker.domain.models import (
     TrackRecord,
 )
 from djmaker.infrastructure.database import LibraryDatabase
+from djmaker.infrastructure.playlists import PlaylistRepository
 from djmaker.plugins.registry import PluginRegistry
 from djmaker.services.audio_analysis import EssentiaAudioAnalyzer
 from djmaker.services.artwork import ArtworkCache
@@ -51,6 +52,10 @@ class LibraryService:
         self.analyzer = analyzer
         self.artwork_cache = artwork_cache
         self.waveform_analyzer = waveform_analyzer
+
+    @property
+    def playlists(self) -> PlaylistRepository:
+        return PlaylistRepository(self.database)
 
     def scan_folder(
         self,

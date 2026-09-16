@@ -24,9 +24,10 @@ from djmaker.domain.models import (
     TrackRecord,
     WaveformAnalysis,
 )
+from djmaker.infrastructure.playlists import create_playlist_schema
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 class DatabaseError(RuntimeError):
@@ -51,6 +52,7 @@ class LibraryDatabase:
                     )
                 if version == 0:
                     self._create_schema(conn)
+                    create_playlist_schema(conn)
                     conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
                     conn.commit()
                 else:
@@ -63,6 +65,11 @@ class LibraryDatabase:
                     if version == 3:
                         self._migrate_v3_to_v4(conn)
                         version = 4
+                    if version == 4:
+                        if not conn.in_transaction:
+                            conn.execute("BEGIN IMMEDIATE")
+                        create_playlist_schema(conn)
+                        version = 5
                     conn.execute(f"PRAGMA user_version={version}")
                     conn.commit()
         except sqlite3.Error as exc:
@@ -74,11 +81,12 @@ class LibraryDatabase:
             with self.connection() as conn:
                 conn.execute("BEGIN IMMEDIATE")
                 conn.execute("DELETE FROM scan_errors")
+                conn.execute("DELETE FROM playlists")
                 conn.execute("DELETE FROM tracks")
                 conn.execute("DELETE FROM roots")
                 conn.execute(
                     "DELETE FROM sqlite_sequence "
-                    "WHERE name IN ('scan_errors', 'tracks', 'roots')"
+                    "WHERE name IN ('scan_errors', 'tracks', 'roots', 'playlists')"
                 )
                 conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
                 conn.commit()
