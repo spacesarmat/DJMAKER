@@ -1244,11 +1244,14 @@ class PlaylistUI:
             width=timeline_width,
             height=timeline_height,
         )
-        horizontal_timeline = ft.Row(
+        horizontal_timeline = ft.ListView(
             controls=[timeline_stack],
+            horizontal=True,
             scroll=ft.ScrollMode.AUTO,
-            expand=True,
-            vertical_alignment=ft.CrossAxisAlignment.START,
+            height=timeline_height,
+            spacing=0,
+            padding=0,
+            build_controls_on_demand=False,
         )
 
         def change_zoom(delta: float) -> None:
@@ -1322,7 +1325,7 @@ class PlaylistUI:
         selected_preview_button.on_click = lambda _: self.page.run_task(
             preview_selected_transition
         )
-        toolbar = ft.Row(
+        toolbar_navigation = ft.Row(
             controls=[
                 ft.Button(
                     content="К плейлистам",
@@ -1334,7 +1337,12 @@ class PlaylistUI:
                     f"{duration_label(layout.duration_ms / 1000)}",
                     size=COMPACT_UI.font_sm,
                 ),
-                ft.Container(expand=True),
+            ],
+            tight=True,
+            spacing=COMPACT_UI.space_md,
+        )
+        toolbar_zoom = ft.Row(
+            controls=[
                 ft.IconButton(
                     icon=ft.Icons.REMOVE,
                     tooltip="Уменьшить масштаб",
@@ -1348,7 +1356,15 @@ class PlaylistUI:
                 ),
                 ft.Button(content="Вместить", on_click=lambda _: fit_timeline()),
             ],
+            tight=True,
+            spacing=COMPACT_UI.space_xs,
+        )
+        toolbar = ft.Row(
+            controls=[toolbar_navigation, toolbar_zoom],
+            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
             wrap=True,
+            run_spacing=COMPACT_UI.space_xs,
         )
         selected_bar = ft.Row(
             controls=[

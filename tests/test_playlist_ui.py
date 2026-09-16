@@ -240,7 +240,16 @@ class PlaylistUIFlowTests(unittest.IsolatedAsyncioTestCase):
         selected_bar.controls[1].on_click(None)
         self.ui.page.run_task.assert_called_once()
         timeline_row = self.ui.content.controls[2].content
+        self.assertIsInstance(timeline_row, ft.ListView)
+        self.assertTrue(timeline_row.horizontal)
+        self.assertIsNone(timeline_row.expand)
+        self.assertEqual(timeline_row.height, 272.0)
         timeline_stack = timeline_row.controls[0]
+        self.assertEqual(timeline_stack.height, timeline_row.height)
+        self.assertEqual(timeline_stack.controls[0].bgcolor, "#090C10")
+        toolbar = self.ui.content.controls[0]
+        self.assertEqual(len(toolbar.controls), 2)
+        self.assertEqual(toolbar.controls[1].controls[-1].content, "Вместить")
         draggable = [
             control
             for control in timeline_stack.controls
