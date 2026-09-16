@@ -61,6 +61,38 @@ class PlaylistRepositoryTests(unittest.TestCase):
             (3, 120, 1),
         )
 
+    def test_batch_add_preserves_order_deduplicates_and_reports_skipped(self) -> None:
+        ident = self.repo.create("Set")
+        self.repo.add(ident, self.ids[1])
+
+        added, skipped = self.repo.add_many(
+            ident, [self.ids[2], self.ids[0], self.ids[2], self.ids[1]]
+        )
+
+        self.assertEqual((added, skipped), (2, 1))
+        self.assertEqual(
+            [track.id for track in self.repo.tracks(ident)],
+            [self.ids[1], self.ids[2], self.ids[0]],
+        )
+
+    def test_batch_add_rolls_back_when_one_track_is_missing(self) -> None:
+        ident = self.repo.create("Set")
+        with self.assertRaises(PlaylistError):
+            self.repo.add_many(ident, [self.ids[0], 999999, self.ids[1]])
+        self.assertEqual(self.repo.tracks(ident), [])
+
+    def test_create_with_tracks_is_atomic_and_preserves_selection_order(self) -> None:
+        ident = self.repo.create_with_tracks(
+            "Batch", [self.ids[2], self.ids[0], self.ids[2], self.ids[1]]
+        )
+        self.assertEqual(
+            [track.id for track in self.repo.tracks(ident)],
+            [self.ids[2], self.ids[0], self.ids[1]],
+        )
+        with self.assertRaises(PlaylistError):
+            self.repo.create_with_tracks("Broken", [self.ids[0], 999999])
+        self.assertEqual([item.name for item in self.repo.list()], ["Batch"])
+
     def test_manual_order_survives_reopen_and_removal_gaps(self) -> None:
         ident = self.repo.create("Set")
         for track_id in self.ids:

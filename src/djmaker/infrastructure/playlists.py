@@ -75,6 +75,23 @@ class PlaylistRepository:
         ):
             raise PlaylistError("Плейлист больше не существует")
 
+    @staticmethod
+    def _unique_track_ids(track_ids: list[int] | tuple[int, ...]) -> list[int]:
+        return list(dict.fromkeys(track_ids))
+
+    @staticmethod
+    def _require_tracks(conn: sqlite3.Connection, track_ids: list[int]) -> None:
+        for track_id in track_ids:
+            if (
+                conn.execute(
+                    "SELECT 1 FROM tracks WHERE id=?", (track_id,)
+                ).fetchone()
+                is None
+            ):
+                raise PlaylistError(
+                    f"Трек {track_id} больше не существует в медиатеке"
+                )
+
     def list(self) -> list[Playlist]:
         try:
             with self.database.connection() as conn:
@@ -131,6 +148,40 @@ class PlaylistRepository:
         except sqlite3.Error as exc:
             raise PlaylistError(f"Не удалось создать плейлист: {exc}") from exc
 
+    def create_with_tracks(
+        self,
+        name: str,
+        track_ids: list[int] | tuple[int, ...],
+    ) -> int:
+        """Атомарно создаёт плейлист и добавляет выбранные треки по порядку."""
+        name = self._name(name)
+        ids = self._unique_track_ids(track_ids)
+        if not ids:
+            raise PlaylistError("Не выбрано ни одного трека")
+        try:
+            with self.database.connection() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                self._require_tracks(conn, ids)
+                cursor = conn.execute(
+                    "INSERT INTO playlists(name, name_key) VALUES (?, ?)",
+                    (name, name.casefold()),
+                )
+                playlist_id = int(cursor.lastrowid)
+                conn.executemany(
+                    "INSERT INTO playlist_tracks(playlist_id, track_id, position) "
+                    "VALUES (?, ?, ?)",
+                    [
+                        (playlist_id, track_id, position)
+                        for position, track_id in enumerate(ids)
+                    ],
+                )
+                conn.commit()
+                return playlist_id
+        except sqlite3.IntegrityError as exc:
+            raise PlaylistError("Плейлист с таким названием уже существует") from exc
+        except sqlite3.Error as exc:
+            raise PlaylistError(f"Не удалось создать плейлист: {exc}") from exc
+
     def rename(self, playlist_id: int, name: str) -> None:
         name = self._name(name)
         try:
@@ -172,30 +223,44 @@ class PlaylistRepository:
             raise PlaylistError(f"Не удалось прочитать треки плейлиста: {exc}") from exc
 
     def add(self, playlist_id: int, track_id: int) -> bool:
+        added, _ = self.add_many(playlist_id, [track_id])
+        return added == 1
+
+    def add_many(
+        self,
+        playlist_id: int,
+        track_ids: list[int] | tuple[int, ...],
+    ) -> tuple[int, int]:
+        """Атомарно добавляет уникальные треки; возвращает added/skipped."""
+        ids = self._unique_track_ids(track_ids)
+        if not ids:
+            raise PlaylistError("Не выбрано ни одного трека")
         try:
             with self.database.connection() as conn:
                 conn.execute("BEGIN IMMEDIATE")
                 self._require(conn, playlist_id)
-                if (
-                    conn.execute(
-                        "SELECT 1 FROM tracks WHERE id=?", (track_id,)
-                    ).fetchone()
-                    is None
-                ):
-                    raise PlaylistError("Трек больше не существует в медиатеке")
-                cursor = conn.execute(
-                    """
-                    INSERT INTO playlist_tracks(playlist_id, track_id, position)
-                    SELECT ?, ?, COALESCE(MAX(position), -1) + 1
-                    FROM playlist_tracks WHERE playlist_id=?
-                    ON CONFLICT(playlist_id, track_id) DO NOTHING
-                """,
-                    (playlist_id, track_id, playlist_id),
-                )
+                self._require_tracks(conn, ids)
+                row = conn.execute(
+                    "SELECT COALESCE(MAX(position), -1) FROM playlist_tracks "
+                    "WHERE playlist_id=?",
+                    (playlist_id,),
+                ).fetchone()
+                position = int(row[0]) + 1
+                added = 0
+                for track_id in ids:
+                    cursor = conn.execute(
+                        "INSERT INTO playlist_tracks(playlist_id, track_id, position) "
+                        "VALUES (?, ?, ?) "
+                        "ON CONFLICT(playlist_id, track_id) DO NOTHING",
+                        (playlist_id, track_id, position),
+                    )
+                    if cursor.rowcount == 1:
+                        position += 1
+                        added += 1
                 conn.commit()
-                return cursor.rowcount == 1
+                return added, len(ids) - added
         except sqlite3.Error as exc:
-            raise PlaylistError(f"Не удалось добавить трек: {exc}") from exc
+            raise PlaylistError(f"Не удалось добавить треки: {exc}") from exc
 
     def remove(self, playlist_id: int, track_id: int) -> None:
         try:

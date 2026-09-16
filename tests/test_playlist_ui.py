@@ -36,13 +36,22 @@ class PlaylistUIFlowTests(unittest.IsolatedAsyncioTestCase):
                 mtime_ns=1,
                 extension=".mp3",
                 file_hash=str(index),
-                metadata=AudioMetadata(title=f"Track {index}"),
+                metadata=AudioMetadata(
+                    title=f"Track {index}",
+                    bpm=128 + index * 2,
+                    musical_key=f"{8 + index}A",
+                ),
                 technical=AudioTechnicalInfo(duration=60),
                 scan_token="test",
             )
         self.ids = [t.id for t in self.db.list_tracks()]
         ui = self.ui = DJMakerUI.__new__(DJMakerUI)
-        ui.service = SimpleNamespace(playlists=self.repo)
+        ui.service = SimpleNamespace(
+            playlists=self.repo,
+            tracks=lambda search="", limit=10_000: self.db.list_tracks(
+                search=search, limit=limit
+            ),
+        )
         ui.page = Mock()
         ui.navigation = SimpleNamespace(selected_index=0)
         ui.content = ft.Column()
@@ -53,6 +62,9 @@ class PlaylistUIFlowTests(unittest.IsolatedAsyncioTestCase):
         ui._track_row_cards = {1: ft.Container()}
         ui._library_track_indices = {1: 0}
         ui._library_list = None
+        ui._selected_library_track_ids = set()
+        ui._library_batch_add_button = None
+        ui._library_batch_clear_button = None
         for name in (
             "_audio_task_contexts",
             "_scan_task_paths",
@@ -63,6 +75,7 @@ class PlaylistUIFlowTests(unittest.IsolatedAsyncioTestCase):
             setattr(ui, name, {})
         ui.tasks = TaskManager()
         ui._notify = Mock()
+        ui.show_library = Mock()
         ui._refresh_task_indicator = Mock()
         ui.show_tasks = Mock(
             side_effect=lambda: setattr(ui.navigation, "selected_index", 5)
@@ -120,6 +133,78 @@ class PlaylistUIFlowTests(unittest.IsolatedAsyncioTestCase):
         dialog.actions[-1].on_click(None)
         self.assertTrue(dialog.content.error_text)
         self.ui.page.pop_dialog.assert_not_called()
+
+    def test_library_multiselect_updates_controls_and_can_be_cleared(self) -> None:
+        ui = self.ui
+        ui._library_track_indices = {self.ids[1]: 0, self.ids[0]: 1}
+        controls = ui._library_batch_controls()
+        checkbox = ui._library_selection_checkbox(self.ids[0])
+
+        checkbox.value = True
+        checkbox.on_change(SimpleNamespace(control=checkbox))
+
+        self.assertEqual(ui._selected_library_track_ids, {self.ids[0]})
+        self.assertEqual(controls.controls[0].content, "В плейлист: 1")
+        self.assertFalse(controls.controls[0].disabled)
+        self.assertTrue(ui._library_selection_checkbox(self.ids[0]).value)
+        ui._clear_library_selection()
+        self.assertEqual(ui._selected_library_track_ids, set())
+        ui.show_library.assert_called_once_with(local_update=True)
+
+    def test_batch_add_uses_current_library_order_and_reports_duplicates(self) -> None:
+        ui = self.ui
+        playlist_id = self.repo.create("Batch")
+        self.repo.add(playlist_id, self.ids[1])
+        ui._library_track_indices = {self.ids[1]: 0, self.ids[0]: 1}
+        ui._selected_library_track_ids = set(self.ids)
+
+        ui._add_selected_to_playlist_dialog()
+        dialog = ui.page.show_dialog.call_args.args[0]
+        dialog.actions[-1].on_click(None)
+
+        self.assertEqual(
+            [track.id for track in self.repo.tracks(playlist_id)],
+            [self.ids[1], self.ids[0]],
+        )
+        self.assertEqual(ui._selected_library_track_ids, set())
+        self.assertIn("Добавлено: 1", ui._notify.call_args.args[0])
+
+    def test_batch_selection_can_create_new_playlist_atomically(self) -> None:
+        ui = self.ui
+        ui._library_track_indices = {self.ids[1]: 0, self.ids[0]: 1}
+        ui._selected_library_track_ids = set(self.ids)
+
+        ui._add_selected_to_playlist_dialog()
+        dialog = ui.page.show_dialog.call_args.args[0]
+        dialog.content.value = "Новый сет"
+        dialog.actions[-1].on_click(None)
+
+        playlist = self.repo.list()[0]
+        self.assertEqual(
+            [track.id for track in self.repo.tracks(playlist.id)],
+            [self.ids[1], self.ids[0]],
+        )
+        self.assertEqual(ui._selected_library_track_ids, set())
+
+    def test_recommendation_dialog_adds_checked_candidate(self) -> None:
+        ui = self.ui
+        playlist_id = self.repo.create("Smart", track_id=self.ids[0])
+        ui._selected_playlist_id = playlist_id
+
+        ui._open_set_recommendations()
+
+        dialog = ui.page.show_dialog.call_args.args[0]
+        results = dialog.content.controls[3]
+        self.assertEqual(len(results.controls), 1)
+        checkbox = results.controls[0].content.controls[0]
+        checkbox.value = True
+        checkbox.on_change(SimpleNamespace(control=checkbox))
+        self.assertFalse(dialog.actions[-1].disabled)
+        dialog.actions[-1].on_click(None)
+        self.assertEqual(
+            [track.id for track in self.repo.tracks(playlist_id)], self.ids
+        )
+        self.assertIn("Рекомендации добавлены: 1", ui._notify.call_args.args[0])
 
     async def test_export_with_files_through_picker_and_task(self) -> None:
         self.create_through_dialog()

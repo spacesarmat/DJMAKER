@@ -159,6 +159,9 @@ class DJMakerUI(PlaylistUI):
         self._library_track_indices: dict[int, int] = {}
         self._track_row_cards: dict[int, ft.Container] = {}
         self._selected_track_id: int | None = None
+        self._selected_library_track_ids: set[int] = set()
+        self._library_batch_add_button: ft.Button | None = None
+        self._library_batch_clear_button: ft.IconButton | None = None
         self._library_viewport_extent = 0.0
         self._library_max_scroll_extent = 0.0
         self._selected_playlist_id: int | None = None
@@ -1507,6 +1510,7 @@ class DJMakerUI(PlaylistUI):
                     weight=ft.FontWeight.BOLD,
                 ),
                 ft.Container(expand=True),
+                self._library_batch_controls(),
                 self.busy,
                 ft.Button(
                     content="BPM / Key",
@@ -1648,6 +1652,7 @@ class DJMakerUI(PlaylistUI):
         card = self._surface_card(
             ft.Row(
                 controls=[
+                    self._library_selection_checkbox(track.id),
                     self._track_artwork(track),
                     metadata_block,
                     self._track_waveform(track),
@@ -3480,6 +3485,9 @@ class DJMakerUI(PlaylistUI):
 
         self.search.value = ""
         self.search_clear_button.visible = False
+        self._selected_library_track_ids.clear()
+        self._library_batch_add_button = None
+        self._library_batch_clear_button = None
         self._search_revision += 1
         self._waveform_views.clear()
         self._track_row_cards.clear()
