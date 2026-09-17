@@ -26,7 +26,7 @@ from djmaker.domain.models import (
     TrackRecord,
     WaveformAnalysis,
 )
-from djmaker.infrastructure.beat_grid import create_beat_grid_schema
+from djmaker.infrastructure.beat_grid import beat_grid_payload, create_beat_grid_schema
 from djmaker.infrastructure.playlists import create_playlist_schema
 from djmaker.infrastructure.set_timeline import create_set_timeline_schema
 
@@ -357,6 +357,10 @@ class LibraryDatabase:
         )
         try:
             with self.connection() as conn:
+                previous = conn.execute(
+                    "SELECT id, file_hash FROM tracks WHERE path=?",
+                    (str(path),),
+                ).fetchone()
                 conn.execute(
                     """
                     INSERT INTO tracks(
@@ -433,6 +437,11 @@ class LibraryDatabase:
                     """,
                     values,
                 )
+                if previous is not None and previous["file_hash"] != file_hash:
+                    conn.execute(
+                        "DELETE FROM track_beat_grid_anchors WHERE track_id=?",
+                        (int(previous["id"]),),
+                    )
                 conn.commit()
         except sqlite3.Error as exc:
             raise DatabaseError(f"Не удалось сохранить трек {path}: {exc}") from exc
@@ -712,20 +721,7 @@ class LibraryDatabase:
                 validate_beat_grid(grid)
             except BeatGridError as exc:
                 raise DatabaseError(f"Некорректная BPM-сетка: {exc}") from exc
-            grid_payload = json.dumps(
-                {
-                    "bpm": round(float(grid.bpm), 8),
-                    "first_beat_ms": grid.first_beat_ms,
-                    "downbeat_ms": grid.downbeat_ms,
-                    "beats_per_bar": grid.beats_per_bar,
-                    "beat_ticks_ms": list(grid.beat_ticks_ms),
-                    "tempo_stability": grid.tempo_stability,
-                    "downbeat_confidence": grid.downbeat_confidence,
-                    "source": grid.source,
-                },
-                ensure_ascii=False,
-                separators=(",", ":"),
-            )
+            grid_payload = beat_grid_payload(grid)
             grid_analyzed_at = grid.analyzed_at or analyzed_at
         try:
             with self.connection() as conn:
@@ -754,11 +750,15 @@ class LibraryDatabase:
                 )
                 if cursor.rowcount != 1:
                     raise DatabaseError(f"Трек не найден: {track_id}")
+                conn.execute(
+                    "DELETE FROM track_beat_grid_anchors WHERE track_id=?",
+                    (track_id,),
+                )
                 conn.commit()
         except sqlite3.Error as exc:
             raise DatabaseError(f"Не удалось сохранить аудио-анализ: {exc}") from exc
 
-    def waveform_counts(self) -> tuple[int, int]:
+    def waveform_counts(self, *, minimum_points: int = 0) -> tuple[int, int]:
         """Возвращает количество всех и уже построенных waveform."""
         try:
             with self.connection() as conn:
@@ -766,17 +766,42 @@ class LibraryDatabase:
                     "SELECT COUNT(*) AS total, "
                     "COUNT(waveform_analyzed_at) AS analyzed FROM tracks"
                 ).fetchone()
+                payloads = (
+                    conn.execute(
+                        "SELECT waveform_peaks FROM tracks "
+                        "WHERE waveform_analyzed_at IS NOT NULL"
+                    ).fetchall()
+                    if minimum_points > 0
+                    else ()
+                )
         except sqlite3.Error as exc:
             raise DatabaseError(
                 f"Не удалось получить статистику waveform: {exc}"
             ) from exc
-        return int(row["total"]), int(row["analyzed"])
+        total = int(row["total"])
+        if minimum_points <= 0:
+            return total, int(row["analyzed"])
+        detailed = 0
+        for payload_row in payloads:
+            try:
+                peak_count = len(
+                    json.loads(payload_row["waveform_peaks"] or "[]")
+                )
+                if peak_count >= minimum_points:
+                    detailed += 1
+            except (TypeError, json.JSONDecodeError):
+                continue
+        return total, detailed
 
     def list_tracks_for_waveform_analysis(
-        self, *, force: bool = False
+        self, *, force: bool = False, minimum_points: int = 0
     ) -> list[TrackRecord]:
-        """Возвращает треки без waveform либо всю медиатеку."""
-        where = "" if force else "WHERE waveform_analyzed_at IS NULL"
+        """Возвращает треки без waveform/детализации либо всю медиатеку."""
+        where = (
+            ""
+            if force or minimum_points > 0
+            else "WHERE waveform_analyzed_at IS NULL"
+        )
         try:
             with self.connection() as conn:
                 rows = conn.execute(
@@ -786,7 +811,14 @@ class LibraryDatabase:
             raise DatabaseError(
                 f"Не удалось получить очередь waveform: {exc}"
             ) from exc
-        return [self._row_to_track(row) for row in rows]
+        tracks = [self._row_to_track(row) for row in rows]
+        if force or minimum_points <= 0:
+            return tracks
+        return [
+            track
+            for track in tracks
+            if track.waveform is None or len(track.waveform.peaks) < minimum_points
+        ]
 
     def save_waveform_analysis(
         self, track_id: int, waveform: WaveformAnalysis

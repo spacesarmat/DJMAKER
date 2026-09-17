@@ -5,17 +5,24 @@ import unittest
 from pathlib import Path
 
 from djmaker.domain.beat_grid import (
+    BeatGridAnchor,
     BeatGridError,
+    beat_number_at_position,
+    beat_position_ms,
     nearest_grid_position,
+    nearest_warped_grid_position,
     regular_grid_markers,
+    validate_anchor_mapping,
     validate_beat_grid,
+    warped_grid_markers,
 )
 from djmaker.domain.models import (
+    AudioAnalysis,
     AudioMetadata,
     AudioTechnicalInfo,
     BeatGridAnalysis,
 )
-from djmaker.infrastructure.beat_grid import BeatGridAnchor, BeatGridRepository
+from djmaker.infrastructure.beat_grid import BeatGridRepository
 from djmaker.infrastructure.database import LibraryDatabase
 
 
@@ -55,6 +62,40 @@ class BeatGridDomainTests(unittest.TestCase):
                     first_beat_ms=0,
                     downbeat_ms=0,
                 )
+            )
+
+    def test_warp_anchors_interpolate_and_inverse_positions(self) -> None:
+        grid = self._grid()
+        anchors = (
+            BeatGridAnchor(track_id=1, source_ms=3200, beat_number=4.0),
+            BeatGridAnchor(track_id=1, source_ms=5000, beat_number=8.0),
+        )
+
+        self.assertEqual(2100, beat_position_ms(grid, 2, anchors))
+        self.assertEqual(4100, beat_position_ms(grid, 6, anchors))
+        self.assertAlmostEqual(6.0, beat_number_at_position(grid, 4100, anchors))
+        self.assertEqual((4100, 6), nearest_warped_grid_position(grid, 4070, anchors))
+        markers = warped_grid_markers(grid, 6000, anchors=anchors)
+        self.assertIn(3200, [marker.position_ms for marker in markers])
+        self.assertIn(5000, [marker.position_ms for marker in markers])
+
+    def test_warp_anchors_reject_crossing_and_extreme_segment_tempo(self) -> None:
+        grid = self._grid()
+        with self.assertRaisesRegex(BeatGridError, "вперёд"):
+            validate_anchor_mapping(
+                grid,
+                [
+                    BeatGridAnchor(1, 3000, 4.0),
+                    BeatGridAnchor(1, 2500, 8.0),
+                ],
+            )
+        with self.assertRaisesRegex(BeatGridError, "вне диапазона"):
+            validate_anchor_mapping(
+                grid,
+                [
+                    BeatGridAnchor(1, 3000, 4.0),
+                    BeatGridAnchor(1, 3100, 8.0),
+                ],
             )
 
         with self.assertRaisesRegex(BeatGridError, "не содержит"):
@@ -111,6 +152,44 @@ class BeatGridRepositoryTests(unittest.TestCase):
             conn.commit()
 
         self.assertEqual([], self.repository.anchors(self.track_id))
+
+    def test_editor_state_is_saved_atomically_with_manual_grid(self) -> None:
+        analyzed_track = self.database.get_track(self.track_id)
+        assert analyzed_track is not None
+        self.database.save_audio_analysis(
+            self.track_id,
+            AudioAnalysis(
+                bpm=120.0,
+                beat_grid=BeatGridAnalysis(
+                    bpm=120.0,
+                    first_beat_ms=250,
+                    downbeat_ms=750,
+                    beat_ticks_ms=(250, 750, 1250, 1750),
+                ),
+            ),
+        )
+        grid = BeatGridAnalysis(
+            bpm=124.5,
+            first_beat_ms=300,
+            downbeat_ms=800,
+            beat_ticks_ms=(250, 750, 1250, 1750),
+            tempo_stability=0.9,
+            downbeat_confidence=0.6,
+            source="manual",
+        )
+        anchors = [BeatGridAnchor(self.track_id, 2800, 4.0)]
+
+        self.repository.save_editor_state(self.track_id, grid, anchors)
+
+        track = self.database.get_track(self.track_id)
+        self.assertIsNotNone(track)
+        assert track is not None and track.analysis is not None
+        self.assertAlmostEqual(124.5, track.analysis.bpm or 0.0)
+        self.assertIsNotNone(track.analysis.beat_grid)
+        assert track.analysis.beat_grid is not None
+        self.assertEqual("manual", track.analysis.beat_grid.source)
+        self.assertEqual(800, track.analysis.beat_grid.downbeat_ms)
+        self.assertEqual(anchors, self.repository.anchors(self.track_id))
 
 
 if __name__ == "__main__":

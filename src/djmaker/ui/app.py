@@ -44,6 +44,7 @@ from djmaker.services.tasks import (
     TaskStatus,
 )
 from djmaker.services.workers import BackgroundWorkers
+from djmaker.services.waveform import resample_waveform_peaks
 from djmaker.settings import (
     AppSettings,
     SettingsStore,
@@ -55,6 +56,7 @@ from djmaker.settings import (
     is_valid_theme_color,
 )
 from djmaker.ui.density import COMPACT_UI, scaled_library_size
+from djmaker.ui.beat_grid_editor import BeatGridEditorUI
 from djmaker.ui.playlists import PlaylistUI
 from djmaker.ui.scrolling import centered_scroll_offset
 from djmaker.ui.theme import (
@@ -126,7 +128,7 @@ class _TagEditorArtworkState:
     artwork: EmbeddedArtwork | None = None
 
 
-class DJMakerUI(PlaylistUI):
+class DJMakerUI(BeatGridEditorUI, PlaylistUI):
     """Связывает Flet-контролы с сервисным слоем приложения."""
 
     def __init__(
@@ -1735,6 +1737,20 @@ class DJMakerUI(PlaylistUI):
                     self._track_waveform(track),
                     self._playlist_track_menu(track.id),
                     ft.IconButton(
+                        icon=ft.Icons.GRID_ON_OUTLINED,
+                        icon_size=self._library_size(COMPACT_UI.action_icon_size),
+                        padding=self._library_size(COMPACT_UI.space_xs),
+                        visual_density=ft.VisualDensity.COMPACT,
+                        tooltip="Редактировать BPM-сетку",
+                        disabled=(
+                            track.analysis is None
+                            or track.analysis.beat_grid is None
+                        ),
+                        on_click=lambda _, track_id=track.id: (
+                            self._open_beat_grid_editor(track_id)
+                        ),
+                    ),
+                    ft.IconButton(
                         icon=ft.Icons.EDIT_OUTLINED,
                         icon_size=self._library_size(COMPACT_UI.action_icon_size),
                         padding=self._library_size(COMPACT_UI.space_xs),
@@ -2032,11 +2048,9 @@ class DJMakerUI(PlaylistUI):
 
     def _track_waveform(self, track: TrackRecord) -> ft.Control:
         peaks = track.waveform.peaks if track.waveform is not None else ()
-        values = list(peaks[: COMPACT_UI.waveform_bar_count])
-        if len(values) < COMPACT_UI.waveform_bar_count:
-            values.extend([0.0] * (COMPACT_UI.waveform_bar_count - len(values)))
-        normalized_peaks = tuple(
-            min(1.0, max(0.0, float(peak))) for peak in values
+        normalized_peaks = resample_waveform_peaks(
+            peaks,
+            COMPACT_UI.waveform_bar_count,
         )
 
         played = 0

@@ -39,6 +39,7 @@ from djmaker.services.transition_preview import (
     TransitionPreviewError,
     render_transition_preview,
 )
+from djmaker.services.waveform import resample_waveform_peaks
 from djmaker.services.tasks import TaskCancelled, TaskKind, TaskPaused, TaskStatus
 from djmaker.ui.density import COMPACT_UI
 
@@ -750,9 +751,10 @@ class PlaylistUI:
         width = 820.0
         height = 76.0
         duration_ms = max(1, round((track.technical.duration or 0) * 1000))
-        peaks = list(track.waveform.peaks if track.waveform else ())
-        if not peaks:
-            peaks = [0.08] * COMPACT_UI.waveform_bar_count
+        peaks = resample_waveform_peaks(
+            track.waveform.peaks if track.waveform else (),
+            COMPACT_UI.waveform_bar_count,
+        )
         controls: list[ft.Control] = [
             ft.Image(
                 src=self._waveform_svg(tuple(peaks)),
@@ -1155,7 +1157,10 @@ class PlaylistUI:
             )
             waveform = ft.Image(
                 src=self._arrangement_waveform_svg(
-                    track.waveform.peaks if track.waveform else (),
+                    resample_waveform_peaks(
+                        track.waveform.peaks if track.waveform else (),
+                        min(600, max(60, round(width / 2))),
+                    ),
                     width=width,
                     height=lane_height,
                     duration_ms=clip.duration_ms,

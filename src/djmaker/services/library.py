@@ -25,7 +25,7 @@ from djmaker.services.drop_import import DropImportPlan
 from djmaker.services.organizer import FileOrganizer
 from djmaker.services.scanner import LibraryScanner
 from djmaker.services.tasks import TaskControl
-from djmaker.services.waveform import WaveformAnalyzer
+from djmaker.services.waveform import WAVEFORM_BAR_COUNT, WaveformAnalyzer
 
 
 class LibraryServiceError(RuntimeError):
@@ -141,13 +141,16 @@ class LibraryService:
 
     def waveform_counts(self) -> tuple[int, int]:
         """Возвращает (всего треков, waveform построено)."""
-        return self.database.waveform_counts()
+        return self.database.waveform_counts(minimum_points=WAVEFORM_BAR_COUNT)
 
     def tracks_for_waveform_analysis(
         self, *, force: bool = False
     ) -> list[TrackRecord]:
         """Возвращает очередь треков для построения waveform."""
-        return self.database.list_tracks_for_waveform_analysis(force=force)
+        return self.database.list_tracks_for_waveform_analysis(
+            force=force,
+            minimum_points=WAVEFORM_BAR_COUNT,
+        )
 
     def analyze_waveform(
         self,

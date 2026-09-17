@@ -11,6 +11,7 @@ from djmaker.services.waveform import (
     WaveformAnalyzer,
     build_waveform_command,
     extract_waveform_peaks,
+    resample_waveform_peaks,
 )
 
 
@@ -41,6 +42,11 @@ class WaveformHelpersTests(unittest.TestCase):
         payload = b"".join(struct.pack("<f", 0.0) for _ in range(120))
         peaks = extract_waveform_peaks(payload, bar_count=12)
         self.assertEqual((0.0,) * 12, peaks)
+
+    def test_resample_keeps_loudest_peak_in_each_visual_bucket(self) -> None:
+        peaks = resample_waveform_peaks((0.1, 0.8, 0.2, 1.0), 2)
+        self.assertEqual((0.8, 1.0), peaks)
+        self.assertEqual((0.0, 0.0, 0.0), resample_waveform_peaks((), 3))
 
 
 class WaveformCancellationTests(unittest.TestCase):

@@ -2,9 +2,18 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
-from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
+
+from djmaker.domain.beat_grid import (
+    BeatGridAnchor,
+    BeatGridError,
+    validate_anchor_mapping,
+    validate_beat_grid,
+)
+from djmaker.domain.models import BeatGridAnalysis
 
 if TYPE_CHECKING:
     from djmaker.infrastructure.database import LibraryDatabase
@@ -12,13 +21,6 @@ if TYPE_CHECKING:
 
 class BeatGridRepositoryError(RuntimeError):
     """Ошибка чтения или сохранения опорных точек сетки."""
-
-
-@dataclass(frozen=True, slots=True)
-class BeatGridAnchor:
-    track_id: int
-    source_ms: int
-    beat_number: float
 
 
 def create_beat_grid_schema(conn: sqlite3.Connection) -> None:
@@ -33,6 +35,25 @@ def create_beat_grid_schema(conn: sqlite3.Connection) -> None:
             UNIQUE(track_id, beat_number)
         );
         """
+    )
+
+
+def beat_grid_payload(grid: BeatGridAnalysis) -> str:
+    """Сериализует проверенную сетку в стабильный компактный JSON."""
+    validate_beat_grid(grid)
+    return json.dumps(
+        {
+            "bpm": round(float(grid.bpm), 8),
+            "first_beat_ms": grid.first_beat_ms,
+            "downbeat_ms": grid.downbeat_ms,
+            "beats_per_bar": grid.beats_per_bar,
+            "beat_ticks_ms": list(grid.beat_ticks_ms),
+            "tempo_stability": grid.tempo_stability,
+            "downbeat_confidence": grid.downbeat_confidence,
+            "source": grid.source,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
     )
 
 
@@ -91,4 +112,59 @@ class BeatGridRepository:
         except sqlite3.Error as exc:
             raise BeatGridRepositoryError(
                 f"Не удалось удалить опорные точки сетки: {exc}"
+            ) from exc
+
+    def save_editor_state(
+        self,
+        track_id: int,
+        grid: BeatGridAnalysis,
+        anchors: tuple[BeatGridAnchor, ...] | list[BeatGridAnchor],
+    ) -> None:
+        """Атомарно сохраняет ручную сетку и полный набор Warp-якорей."""
+        normalized = tuple(
+            BeatGridAnchor(
+                track_id=track_id,
+                source_ms=int(anchor.source_ms),
+                beat_number=float(anchor.beat_number),
+            )
+            for anchor in anchors
+        )
+        try:
+            validate_beat_grid(grid)
+            validate_anchor_mapping(grid, normalized)
+            payload = beat_grid_payload(grid)
+        except BeatGridError as exc:
+            raise BeatGridRepositoryError(str(exc)) from exc
+
+        now = datetime.now(UTC).isoformat()
+        analyzed_at = grid.analyzed_at or now
+        try:
+            with self.database.connection() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                cursor = conn.execute(
+                    "UPDATE tracks SET analysis_bpm=?, beat_grid_json=?, "
+                    "beat_grid_analyzed_at=?, updated_at=? "
+                    "WHERE id=? AND analyzed_at IS NOT NULL",
+                    (grid.bpm, payload, analyzed_at, now, track_id),
+                )
+                if cursor.rowcount != 1:
+                    raise BeatGridRepositoryError(
+                        "Трек не найден или полный анализ ещё не выполнен"
+                    )
+                conn.execute(
+                    "DELETE FROM track_beat_grid_anchors WHERE track_id=?",
+                    (track_id,),
+                )
+                conn.executemany(
+                    "INSERT INTO track_beat_grid_anchors"
+                    "(track_id, source_ms, beat_number) VALUES (?,?,?)",
+                    (
+                        (track_id, anchor.source_ms, anchor.beat_number)
+                        for anchor in normalized
+                    ),
+                )
+                conn.commit()
+        except sqlite3.Error as exc:
+            raise BeatGridRepositoryError(
+                f"Не удалось сохранить редактор BPM-сетки: {exc}"
             ) from exc

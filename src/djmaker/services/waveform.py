@@ -14,7 +14,7 @@ from djmaker.services.audio_analysis import _creation_flags, _terminate_process
 from djmaker.services.tasks import TaskControl, TaskInterrupted
 
 
-WAVEFORM_BAR_COUNT = 60
+WAVEFORM_BAR_COUNT = 2048
 WAVEFORM_SAMPLE_RATE = 800
 WAVEFORM_TIMEOUT_SECONDS = 60 * 10
 
@@ -148,3 +148,22 @@ def extract_waveform_peaks(
         # сохраняя реальные пики выше фоновой части.
         normalized.append(round(math.sqrt(ratio), 4))
     return tuple(normalized)
+
+
+def resample_waveform_peaks(
+    peaks: tuple[float, ...] | list[float],
+    point_count: int,
+) -> tuple[float, ...]:
+    """Сворачивает waveform до заданного числа визуальных максимумов."""
+    if point_count < 1:
+        raise ValueError("point_count должен быть >= 1")
+    if not peaks:
+        return (0.0,) * point_count
+    result: list[float] = []
+    source_count = len(peaks)
+    for index in range(point_count):
+        start = index * source_count // point_count
+        stop = max(start + 1, (index + 1) * source_count // point_count)
+        bucket = peaks[start:min(source_count, stop)]
+        result.append(max((float(value) for value in bucket), default=0.0))
+    return tuple(min(1.0, max(0.0, value)) for value in result)

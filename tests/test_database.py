@@ -13,6 +13,7 @@ from djmaker.domain.models import (
     BeatGridAnalysis,
     WaveformAnalysis,
 )
+from djmaker.infrastructure.beat_grid import BeatGridAnchor, BeatGridRepository
 from djmaker.infrastructure.database import LibraryDatabase
 
 
@@ -181,6 +182,8 @@ class LibraryDatabaseTests(unittest.TestCase):
             track.id,
             AudioAnalysis(bpm=120.0, musical_key="C", scale="major", camelot="8B"),
         )
+        anchors = BeatGridRepository(self.db)
+        anchors.save_anchor(BeatGridAnchor(track.id, 1000, 0.0))
         stat = track.path.stat()
 
         self.db.upsert_track(
@@ -199,6 +202,7 @@ class LibraryDatabaseTests(unittest.TestCase):
         self.assertIsNotNone(updated)
         assert updated is not None
         self.assertIsNone(updated.analysis)
+        self.assertEqual([], anchors.anchors(track.id))
 
 
     def test_waveform_is_saved_and_loaded_separately(self) -> None:
@@ -218,6 +222,35 @@ class LibraryDatabaseTests(unittest.TestCase):
         self.assertEqual((0.0, 0.25, 0.5, 1.0), updated.waveform.peaks)
         self.assertTrue(updated.waveform.analyzed_at)
         self.assertEqual((1, 1), self.db.waveform_counts())
+
+    def test_low_resolution_waveform_is_queued_for_editor_upgrade(self) -> None:
+        self._insert("wave.mp3", "wave-hash")
+        track = self.db.list_tracks()[0]
+        self.db.save_waveform_analysis(
+            track.id,
+            WaveformAnalysis(peaks=(0.5,) * 60),
+        )
+
+        self.assertEqual((1, 0), self.db.waveform_counts(minimum_points=2048))
+        self.assertEqual(
+            [track.id],
+            [
+                item.id
+                for item in self.db.list_tracks_for_waveform_analysis(
+                    minimum_points=2048
+                )
+            ],
+        )
+
+        self.db.save_waveform_analysis(
+            track.id,
+            WaveformAnalysis(peaks=(0.5,) * 2048),
+        )
+        self.assertEqual((1, 1), self.db.waveform_counts(minimum_points=2048))
+        self.assertEqual(
+            [],
+            self.db.list_tracks_for_waveform_analysis(minimum_points=2048),
+        )
 
     def test_changed_file_hash_invalidates_previous_waveform(self) -> None:
         self._insert("wave.mp3", "wave-hash")
