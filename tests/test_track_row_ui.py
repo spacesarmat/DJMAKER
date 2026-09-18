@@ -52,15 +52,17 @@ class TrackRowUITests(unittest.TestCase):
         )
 
     def test_track_tags_highlight_on_hover(self) -> None:
-        source = UI_SOURCE.read_text(encoding="utf-8")
         track_row_source = TRACK_ROW_SOURCE.read_text(encoding="utf-8")
+        library_search_source = (
+            PROJECT_ROOT / "src" / "djmaker" / "ui" / "library_search_controls.py"
+        ).read_text(encoding="utf-8")
 
         self.assertIn("on_hover=(", track_row_source)
         self.assertIn("app._on_accent_track_tag_hover", track_row_source)
         self.assertIn("app._on_neutral_track_tag_hover", track_row_source)
-        self.assertIn("ft.Colors.PRIMARY if hovered", source)
-        self.assertIn("ft.Colors.PRIMARY_CONTAINER", source)
-        self.assertIn("event.control.update()", source)
+        self.assertIn("ft.Colors.PRIMARY if hovered", library_search_source)
+        self.assertIn("ft.Colors.PRIMARY_CONTAINER", library_search_source)
+        self.assertIn("event.control.update()", library_search_source)
         self.assertIn("duration=120", track_row_source)
         self.assertIn("ft.AnimationCurve.EASE_OUT_CUBIC", track_row_source)
 

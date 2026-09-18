@@ -12,6 +12,9 @@ DROP_SOURCE = PROJECT_ROOT / "src" / "djmaker" / "ui" / "drop_import_controls.py
 NAVIGATION_CARDS_SOURCE = (
     PROJECT_ROOT / "src" / "djmaker" / "ui" / "navigation_cards_controls.py"
 )
+LIBRARY_SEARCH_SOURCE = (
+    PROJECT_ROOT / "src" / "djmaker" / "ui" / "library_search_controls.py"
+)
 PYPROJECT = PROJECT_ROOT / "pyproject.toml"
 TASK_SOURCE = PROJECT_ROOT / "src" / "djmaker" / "services" / "tasks.py"
 
@@ -44,9 +47,10 @@ class DragDropUITests(unittest.TestCase):
 
     def test_drop_overlay_explains_filtering(self) -> None:
         source = UI_SOURCE.read_text(encoding="utf-8")
+        library_search_source = LIBRARY_SEARCH_SOURCE.read_text(encoding="utf-8")
 
-        self.assertIn("Отпустите файлы или папки", source)
-        self.assertIn("остальные файлы пропущены", source)
+        self.assertIn("Отпустите файлы или папки", library_search_source)
+        self.assertIn("остальные файлы пропущены", library_search_source)
         self.assertIn("def _on_drop_entered", source)
         self.assertIn("def _on_drop_exited", source)
 

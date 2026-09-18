@@ -19,19 +19,14 @@ except ImportError:  # pragma: no cover - зависит от desktop extension 
 from djmaker.config import DEFAULT_ORGANIZE_TEMPLATE, DEFAULT_TARGET_LUFS, AppPaths
 from djmaker.domain.library_sort import LIBRARY_SORT_LABELS
 from djmaker.domain.models import (
-    AudioMetadata,
-    EmbeddedArtwork,
     MetadataCandidate,
     TrackRecord,
 )
-from djmaker.plugins.base import MetadataProviderError
 from djmaker.runtime.dependencies import (
     DependencyStatus,
     RuntimeDependencies,
     RuntimeReport,
 )
-from djmaker.services.audio_analysis import recommended_analysis_concurrency
-from djmaker.services.file_browser import reveal_file
 from djmaker.services.library import LibraryService
 from djmaker.services.playlist_export import PlaylistExportRequest
 from djmaker.services.tasks import (
@@ -44,20 +39,17 @@ from djmaker.services.tasks import (
     TaskStatus,
 )
 from djmaker.services.workers import BackgroundWorkers
-from djmaker.services.waveform import resample_waveform_peaks
 from djmaker.settings import (
     AppSettings,
     SettingsStore,
-    LIBRARY_SCALE_MAX,
-    LIBRARY_SCALE_MIN,
-    LIBRARY_SCALE_STEP,
     THEME_COLOR_ROLES,
     THEME_MODES,
     is_valid_theme_color,
 )
-from djmaker.ui.density import COMPACT_UI, scaled_library_size
+from djmaker.ui.density import COMPACT_UI
 from djmaker.ui.beat_grid_editor import BeatGridEditorUI
 from djmaker.ui.drop_import_controls import DropImportController
+from djmaker.ui.library_search_controls import LibrarySearchController
 from djmaker.ui.navigation_cards_controls import NavigationCardsController
 from djmaker.ui.player_controls import PlayerControlsController
 from djmaker.ui.playlists import PlaylistUI
@@ -82,7 +74,6 @@ from djmaker.ui.theme import (
 
 LOGGER = logging.getLogger(__name__)
 
-_LIBRARY_SEARCH_DEBOUNCE_SECONDS = 0.22
 _PLAYER_SOURCE_LOAD_TIMEOUT_SECONDS = 15.0
 _THEME_EDITOR_MODE_LABELS = {
     "light": "Светлая",
@@ -104,12 +95,6 @@ _THEME_ROLE_LABELS = {
     "outline_variant": "Мягкий контур",
     "error": "Ошибка",
 }
-
-
-@dataclass(slots=True)
-class _TagEditorArtworkState:
-    changed: bool = False
-    artwork: EmbeddedArtwork | None = None
 
 
 class DJMakerUI(BeatGridEditorUI, PlaylistUI):
@@ -248,6 +233,7 @@ class DJMakerUI(BeatGridEditorUI, PlaylistUI):
             tooltip="Остановить",
             on_click=self._stop_player,
         )
+        self.library_search = LibrarySearchController(self)
         self.player_bar = self._build_player_bar()
         self.player = PlayerControlsController(self)
         self.content = ft.Column(expand=True, spacing=COMPACT_UI.space_md)
@@ -278,38 +264,7 @@ class DJMakerUI(BeatGridEditorUI, PlaylistUI):
 
     def _build_drop_overlay(self) -> ft.Container:
         """Создаёт полнооконный индикатор активного Drag&Drop."""
-        return ft.Container(
-            visible=False,
-            left=0,
-            right=0,
-            top=0,
-            bottom=0,
-            opacity=0.96,
-            bgcolor=ft.Colors.SURFACE_CONTAINER_HIGHEST,
-            alignment=ft.Alignment.CENTER,
-            content=ft.Column(
-                controls=[
-                    ft.Icon(
-                        ft.Icons.DRIVE_FOLDER_UPLOAD,
-                        size=52,
-                        color=ft.Colors.PRIMARY,
-                    ),
-                    ft.Text(
-                        "Отпустите файлы или папки",
-                        size=COMPACT_UI.font_lg,
-                        weight=ft.FontWeight.BOLD,
-                    ),
-                    ft.Text(
-                        "Поддерживаемое аудио будет добавлено, остальные файлы пропущены",
-                        size=COMPACT_UI.font_sm,
-                        color=ft.Colors.ON_SURFACE_VARIANT,
-                    ),
-                ],
-                spacing=COMPACT_UI.space_sm,
-                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                tight=True,
-            ),
-        )
+        return self.library_search.build_drop_overlay()
 
     def _on_drop_entered(self, _: object) -> None:
         self._drop_overlay.visible = True
@@ -325,39 +280,7 @@ class DJMakerUI(BeatGridEditorUI, PlaylistUI):
 
     def _build_player_bar(self) -> ft.Container:
         """Создаёт компактный постоянный плеер прослушивания."""
-        return ft.Container(
-            visible=False,
-            bgcolor=ft.Colors.SURFACE_CONTAINER,
-            padding=ft.Padding.symmetric(
-                horizontal=COMPACT_UI.status_horizontal_padding,
-                vertical=COMPACT_UI.space_sm,
-            ),
-            content=ft.Row(
-                controls=[
-                    self.player_play_button,
-                    self.player_stop_button,
-                    ft.Icon(
-                        ft.Icons.HEADPHONES,
-                        size=COMPACT_UI.action_icon_size,
-                        color=ft.Colors.PRIMARY,
-                    ),
-                    ft.Column(
-                        controls=[self.player_title, self.player_position],
-                        spacing=0,
-                        width=270,
-                    ),
-                    self.player_progress,
-                    ft.Container(expand=True),
-                    ft.Text(
-                        "Клик по waveform — переход к позиции",
-                        size=COMPACT_UI.font_micro,
-                        color=ft.Colors.ON_SURFACE_VARIANT,
-                    ),
-                ],
-                spacing=COMPACT_UI.space_sm,
-                vertical_alignment=ft.CrossAxisAlignment.CENTER,
-            ),
-        )
+        return self.library_search.build_player_bar()
 
     def _ensure_audio_service(
         self,
@@ -393,18 +316,7 @@ class DJMakerUI(BeatGridEditorUI, PlaylistUI):
         await self.track_selection.play_track(track_id, position_ms)
 
     async def _toggle_player(self, _: object) -> None:
-        if self.audio is None:
-            return
-        try:
-            if self._player_state is fta.AudioState.PLAYING:
-                await self.audio.pause()
-            elif self._player_state is fta.AudioState.COMPLETED:
-                await self.audio.play()
-            else:
-                await self.audio.resume()
-        except Exception as exc:
-            LOGGER.exception("Ошибка управления плеером")
-            self._notify(f"Ошибка плеера: {exc}")
+        await self.library_search.toggle_player(_)
 
     async def _stop_player(self, _: object) -> None:
         await self.player.stop_player(_)
@@ -629,19 +541,14 @@ class DJMakerUI(BeatGridEditorUI, PlaylistUI):
         self.page.update()
 
     def _set_busy(self, value: bool, message: str = "") -> None:
-        self.busy.visible = value
-        if message:
-            self.status.value = message
-        self.page.update()
+        self.library_search.set_busy(value, message)
 
     def _set_status(self, message: str) -> None:
         self.status.value = message
         self.page.update()
 
     def _notify(self, message: str) -> None:
-        self.status.value = message
-        self.page.show_dialog(ft.SnackBar(content=ft.Text(message)))
-        self.page.update()
+        self.library_search.notify(message)
 
     def _refresh_task_indicator(self) -> None:
         """Синхронизирует компактный индикатор фоновых задач."""
@@ -708,8 +615,7 @@ class DJMakerUI(BeatGridEditorUI, PlaylistUI):
 
     async def _on_search(self, _: object) -> None:
         """Немедленно применяет поисковый запрос по Enter."""
-        self._search_revision += 1
-        self.show_library(local_update=True)
+        await self.library_search.on_search(_)
 
     def _on_search_change(self, _: object) -> None:
         """Дебаунсит живой поиск, чтобы не перестраивать 1000 строк на каждый символ."""
@@ -720,85 +626,18 @@ class DJMakerUI(BeatGridEditorUI, PlaylistUI):
         self.page.run_task(self._debounced_library_search, revision)
 
     async def _debounced_library_search(self, revision: int) -> None:
-        await asyncio.sleep(_LIBRARY_SEARCH_DEBOUNCE_SECONDS)
-        if revision != self._search_revision or self.navigation.selected_index != 0:
-            return
-        self.show_library(local_update=True)
+        await self.library_search.debounced_library_search(revision)
 
     def _clear_search(self, _: object) -> None:
-        self.search.value = ""
-        self.search_clear_button.visible = False
-        self._search_revision += 1
-        self.show_library(local_update=True)
+        self.library_search.clear_search(_)
 
     def _build_library_search_block(self, result_count: int) -> ft.Container:
         """Возвращает тематический поисковый блок медиатеки."""
-        return ft.Container(
-            bgcolor=ft.Colors.SURFACE_CONTAINER,
-            border_radius=COMPACT_UI.radius,
-            padding=ft.Padding.symmetric(
-                horizontal=COMPACT_UI.card_padding,
-                vertical=COMPACT_UI.space_sm,
-            ),
-            content=ft.Row(
-                controls=[
-                    ft.Icon(
-                        ft.Icons.SEARCH,
-                        size=COMPACT_UI.action_icon_size,
-                        color=ft.Colors.PRIMARY,
-                    ),
-                    self.search,
-                    self._library_sort_control(),
-                    ft.Container(
-                        width=1,
-                        height=22,
-                        bgcolor=ft.Colors.OUTLINE_VARIANT,
-                    ),
-                    ft.Text(
-                        f"Найдено: {result_count}",
-                        size=COMPACT_UI.font_xs,
-                        color=ft.Colors.ON_SURFACE_VARIANT,
-                    ),
-                ],
-                spacing=COMPACT_UI.space_sm,
-                vertical_alignment=ft.CrossAxisAlignment.CENTER,
-            ),
-        )
+        return self.library_search.build_library_search_block(result_count)
 
     def _library_sort_control(self) -> ft.Row:
         """Выбор порядка не зависит от масштаба строк медиатеки."""
-        descending = self.settings.library_sort_descending
-        return ft.Row(
-            controls=[
-                ft.Dropdown(
-                    label="Сортировка",
-                    width=210,
-                    dense=True,
-                    text_size=COMPACT_UI.font_sm,
-                    value=self.settings.library_sort,
-                    options=[
-                        ft.DropdownOption(key=key, text=label)
-                        for key, label in LIBRARY_SORT_LABELS.items()
-                    ],
-                    on_select=self._on_library_sort_selected,
-                ),
-                ft.IconButton(
-                    icon=(
-                        ft.Icons.ARROW_DOWNWARD
-                        if descending else ft.Icons.ARROW_UPWARD
-                    ),
-                    icon_size=COMPACT_UI.action_icon_size,
-                    tooltip=(
-                        "По убыванию. Переключить на возрастание"
-                        if descending else
-                        "По возрастанию. Переключить на убывание"
-                    ),
-                    on_click=self._toggle_library_sort_direction,
-                ),
-            ],
-            spacing=0,
-            tight=True,
-        )
+        return self.library_search.library_sort_control()
 
     def _on_library_sort_selected(self, event: object) -> None:
         control = getattr(event, "control", None)
@@ -847,159 +686,15 @@ class DJMakerUI(BeatGridEditorUI, PlaylistUI):
 
     def _library_scale_control(self) -> ft.Control:
         """Строит компактное управление масштабом строк медиатеки."""
-        percent = self.settings.library_scale_percent
-        return ft.Container(
-            bgcolor=ft.Colors.SURFACE_CONTAINER,
-            border_radius=COMPACT_UI.radius,
-            padding=ft.Padding.symmetric(horizontal=COMPACT_UI.space_xs),
-            content=ft.Row(
-                controls=[
-                    ft.IconButton(
-                        icon=ft.Icons.ZOOM_OUT,
-                        icon_size=COMPACT_UI.action_icon_size,
-                        padding=COMPACT_UI.space_xs,
-                        visual_density=ft.VisualDensity.COMPACT,
-                        tooltip="Уменьшить строки",
-                        disabled=percent <= LIBRARY_SCALE_MIN,
-                        on_click=lambda _: self._change_library_scale(
-                            -LIBRARY_SCALE_STEP
-                        ),
-                    ),
-                    ft.Text(
-                        f"{percent}%",
-                        width=34,
-                        text_align=ft.TextAlign.CENTER,
-                        size=COMPACT_UI.font_xs,
-                        weight=ft.FontWeight.BOLD,
-                    ),
-                    ft.IconButton(
-                        icon=ft.Icons.ZOOM_IN,
-                        icon_size=COMPACT_UI.action_icon_size,
-                        padding=COMPACT_UI.space_xs,
-                        visual_density=ft.VisualDensity.COMPACT,
-                        tooltip="Увеличить строки",
-                        disabled=percent >= LIBRARY_SCALE_MAX,
-                        on_click=lambda _: self._change_library_scale(
-                            LIBRARY_SCALE_STEP
-                        ),
-                    ),
-                ],
-                spacing=0,
-                tight=True,
-                vertical_alignment=ft.CrossAxisAlignment.CENTER,
-            ),
-        )
+        return self.library_search.library_scale_control()
 
     def _change_library_scale(self, delta: int) -> None:
         """Сохраняет новый масштаб и немедленно перестраивает медиатеку."""
-        current = self.settings.library_scale_percent
-        target = min(
-            LIBRARY_SCALE_MAX,
-            max(LIBRARY_SCALE_MIN, current + delta),
-        )
-        if target == current:
-            return
-
-        settings = replace(self.settings, library_scale_percent=target)
-        try:
-            self.settings_store.save(settings)
-        except OSError as exc:
-            LOGGER.exception("Не удалось сохранить масштаб медиатеки")
-            self._notify(f"Не удалось сохранить масштаб: {exc}")
-            return
-
-        self.settings = settings
-        selected_track_id = self._selected_track_id
-        self.show_library()
-        if (
-            selected_track_id is not None
-            and selected_track_id in self._library_track_indices
-        ):
-            self.page.run_task(
-                self._select_library_track,
-                selected_track_id,
-            )
+        self.library_search.change_library_scale(delta)
 
     def show_library(self, *, local_update: bool = False) -> None:
         """Отображает локальную медиатеку."""
-        self._set_navigation_index(0)
-        try:
-            tracks = self.service.tracks(
-                self.search.value or "", limit=1000,
-                sort_by=self.settings.library_sort,
-                descending=self.settings.library_sort_descending,
-            )
-        except RuntimeError as exc:
-            self._notify(str(exc))
-            return
-
-        actions = ft.Row(
-            controls=[
-                ft.Text(
-                    f"Показано треков: {len(tracks)}",
-                    size=COMPACT_UI.font_sm,
-                    weight=ft.FontWeight.BOLD,
-                ),
-                ft.Container(expand=True),
-                self._library_batch_controls(),
-                self.busy,
-                ft.Button(
-                    content="Полный анализ",
-                    icon=ft.Icons.SPEED,
-                    on_click=self._start_audio_analysis,
-                ),
-                ft.Button(
-                    content="Обновить",
-                    icon=ft.Icons.REFRESH,
-                    on_click=lambda _: self.show_library(),
-                ),
-                self._library_scale_control(),
-                self.theme_button,
-            ],
-            vertical_alignment=ft.CrossAxisAlignment.CENTER,
-            spacing=COMPACT_UI.space_sm,
-        )
-        self._waveform_views.clear()
-        self._track_row_cards.clear()
-        self._library_track_indices = {
-            track.id: index for index, track in enumerate(tracks)
-        }
-        self._library_viewport_extent = 0.0
-        self._library_max_scroll_extent = 0.0
-        items: list[ft.Control] = []
-        if not tracks:
-            items.append(
-                self._empty_state(
-                    ft.Icons.LIBRARY_MUSIC_OUTLINED,
-                    "Медиатека пока пуста",
-                    "Добавьте музыкальную папку в разделе «Папки» и запустите сканирование.",
-                )
-            )
-            listing = ft.ListView(
-                controls=items,
-                expand=True,
-                spacing=COMPACT_UI.space_sm,
-            )
-        else:
-            items.extend(self._track_row(track) for track in tracks)
-            listing = ft.ListView(
-                controls=items,
-                expand=True,
-                spacing=0,
-                item_extent=self._track_item_extent(),
-                on_scroll=self._on_library_scroll,
-                scroll_interval=50,
-            )
-        self._library_list = listing
-        self.search_clear_button.visible = bool(self.search.value)
-        self._replace_content(
-            "Медиатека",
-            "Поиск, теги и организация локальной музыкальной коллекции",
-            actions,
-            self._build_library_search_block(len(tracks)),
-            listing,
-            local_update=local_update,
-        )
+        self.library_search.show_library(local_update=local_update)
 
     def _track_item_extent(self) -> float:
         """Высота строки медиатеки с учётом пользовательского масштаба."""
@@ -1036,34 +731,12 @@ class DJMakerUI(BeatGridEditorUI, PlaylistUI):
     @staticmethod
     def _on_accent_track_tag_hover(event: ft.Event[ft.Container]) -> None:
         """Усиливает акцентный тег при наведении без обновления строки."""
-        hovered = bool(event.data)
-        event.control.bgcolor = (
-            ft.Colors.PRIMARY if hovered else ft.Colors.PRIMARY_CONTAINER
-        )
-        if isinstance(event.control.content, ft.Text):
-            event.control.content.color = (
-                ft.Colors.ON_PRIMARY
-                if hovered
-                else ft.Colors.ON_PRIMARY_CONTAINER
-            )
-        event.control.update()
+        LibrarySearchController.on_accent_track_tag_hover(event)
 
     @staticmethod
     def _on_neutral_track_tag_hover(event: ft.Event[ft.Container]) -> None:
         """Подсвечивает технический тег цветами активной темы."""
-        hovered = bool(event.data)
-        event.control.bgcolor = (
-            ft.Colors.PRIMARY_CONTAINER
-            if hovered
-            else ft.Colors.SURFACE_CONTAINER_HIGHEST
-        )
-        if isinstance(event.control.content, ft.Text):
-            event.control.content.color = (
-                ft.Colors.ON_PRIMARY_CONTAINER
-                if hovered
-                else ft.Colors.ON_SURFACE_VARIANT
-            )
-        event.control.update()
+        LibrarySearchController.on_neutral_track_tag_hover(event)
 
     @staticmethod
     def _track_bpm_label(track: TrackRecord) -> str:
@@ -1576,113 +1249,11 @@ class DJMakerUI(BeatGridEditorUI, PlaylistUI):
 
     def _open_database_reset_dialog(self, _: object) -> None:
         """Запрашивает подтверждение полного сброса SQLite-медиатеки."""
-        if self.tasks.active_count() > 0:
-            self._notify(
-                "Сначала остановите или отмените активные задачи перед обнулением БД"
-            )
-            return
-
-        async def execute(_: object) -> None:
-            if self.tasks.active_count() > 0:
-                self._notify(
-                    "Обнуление отменено: появились активные фоновые задачи"
-                )
-                return
-
-            self.page.pop_dialog()
-            self._set_busy(True, "Обнуление базы данных...")
-            try:
-                if self.audio is not None:
-                    try:
-                        await self.audio.pause()
-                        await self.audio.seek(ft.Duration(milliseconds=0))
-                    except Exception:
-                        LOGGER.debug(
-                            "Не удалось остановить плеер перед сбросом БД",
-                            exc_info=True,
-                        )
-
-                await self.workers.run(self.service.reset_library)
-            except Exception as exc:
-                LOGGER.exception("Ошибка обнуления БД")
-                self._notify(f"Не удалось обнулить БД: {exc}")
-            else:
-                self._clear_library_runtime_state()
-                self._notify("База данных обнулена. Музыкальные файлы не изменялись")
-                self.show_library()
-            finally:
-                self._set_busy(False)
-
-        dialog = ft.AlertDialog(
-            modal=True,
-            title=ft.Text("Обнулить базу данных?"),
-            content=ft.Column(
-                controls=[
-                    ft.Text(
-                        "Будут удалены все записи медиатеки: музыкальные папки, "
-                        "индекс треков, плейлисты, результаты BPM/Key, waveform, ссылки на "
-                        "обложки и журнал ошибок сканирования."
-                    ),
-                    ft.Text(
-                        "Музыкальные файлы, их теги, настройки приложения, лог и "
-                        "файлы кэша обложек удаляться не будут.",
-                        color=ft.Colors.ON_SURFACE_VARIANT,
-                    ),
-                    ft.Text(
-                        str(self.paths.database),
-                        selectable=True,
-                        size=COMPACT_UI.font_xs,
-                        color=ft.Colors.ERROR,
-                    ),
-                ],
-                tight=True,
-                spacing=COMPACT_UI.space_sm,
-            ),
-            actions=[
-                ft.Button(
-                    content="Отмена",
-                    on_click=lambda _: self.page.pop_dialog(),
-                ),
-                ft.Button(
-                    content="Обнулить БД",
-                    icon=ft.Icons.DELETE_FOREVER_OUTLINED,
-                    on_click=execute,
-                ),
-            ],
-        )
-        self.page.show_dialog(dialog)
+        self.library_search.open_database_reset_dialog(_)
 
     def _clear_library_runtime_state(self) -> None:
         """Сбрасывает UI-состояние, связанное с удалёнными записями БД."""
-        self._selected_playlist_id = None
-        self._playlist_export_contexts.clear()
-        self._player_request_revision += 1
-        self._selected_track_id = None
-        self._player_track_id = None
-        self._player_track_path = None
-        self._player_position_ms = 0
-        self._player_duration_ms = 0
-        self._player_state = fta.AudioState.STOPPED
-        self._player_switching = False
-        self._player_load_event = None
-        self.player_title.value = ""
-        self.player_position.value = "00:00 / 00:00"
-        self.player_progress.value = 0.0
-        self.player_play_button.icon = ft.Icons.PLAY_ARROW
-        self.player_bar.visible = False
-
-        self.search.value = ""
-        self.search_clear_button.visible = False
-        self._selected_library_track_ids.clear()
-        self._library_batch_add_button = None
-        self._library_batch_clear_button = None
-        self._search_revision += 1
-        self._waveform_views.clear()
-        self._track_row_cards.clear()
-        self._library_track_indices.clear()
-        self._library_list = None
-        self._library_viewport_extent = 0.0
-        self._library_max_scroll_extent = 0.0
+        self.library_search.clear_library_runtime_state()
 
     @staticmethod
     def _path_setting(label: str, path: Path) -> ft.Control:
@@ -1742,509 +1313,27 @@ class DJMakerUI(BeatGridEditorUI, PlaylistUI):
         return f"Тема: {THEME_MODE_LABELS[self.settings.theme_mode]}. Нажмите для переключения."
 
     def _open_tag_editor(self, track_id: int) -> None:
-        track = self.service.database.get_track(track_id)
-        if track is None:
-            self._notify("Трек не найден")
-            return
-
-        metadata = track.metadata
-        title = ft.TextField(
-            label="Название",
-            dense=True,
-            text_size=COMPACT_UI.font_sm,
-            value=metadata.title,
-            expand=True,
-        )
-        artist = ft.TextField(
-            label="Исполнитель",
-            dense=True,
-            text_size=COMPACT_UI.font_sm,
-            value=metadata.artist,
-            expand=True,
-        )
-        album = ft.TextField(
-            label="Альбом",
-            dense=True,
-            text_size=COMPACT_UI.font_sm,
-            value=metadata.album,
-            expand=True,
-        )
-        album_artist = ft.TextField(
-            label="Исполнитель альбома",
-            dense=True,
-            text_size=COMPACT_UI.font_sm,
-            value=metadata.album_artist,
-            expand=True,
-        )
-        genre = ft.TextField(
-            label="Жанр",
-            dense=True,
-            text_size=COMPACT_UI.font_sm,
-            value=metadata.genre,
-            expand=True,
-        )
-        year = ft.TextField(
-            label="Год",
-            dense=True,
-            text_size=COMPACT_UI.font_sm,
-            value=metadata.year,
-            width=110,
-        )
-        track_no = ft.TextField(
-            label="Трек",
-            dense=True,
-            text_size=COMPACT_UI.font_sm,
-            value=str(metadata.track_number or ""),
-            width=90,
-        )
-        disc_no = ft.TextField(
-            label="Диск",
-            dense=True,
-            text_size=COMPACT_UI.font_sm,
-            value=str(metadata.disc_number or ""),
-            width=90,
-        )
-        bpm = ft.TextField(
-            label="BPM (тег)",
-            dense=True,
-            text_size=COMPACT_UI.font_sm,
-            value=str(metadata.bpm or ""),
-            width=120,
-        )
-        musical_key = ft.TextField(
-            label="Key (тег)",
-            dense=True,
-            text_size=COMPACT_UI.font_sm,
-            value=metadata.musical_key,
-            width=150,
-        )
-
-        artwork_state = _TagEditorArtworkState()
-        artwork_supported = track.path.suffix.lower() in {
-            ".mp3",
-            ".flac",
-            ".m4a",
-            ".m4b",
-            ".mp4",
-        }
-        artwork_box = ft.Container(
-            width=116,
-            height=116,
-            border_radius=COMPACT_UI.radius,
-            bgcolor=ft.Colors.SURFACE_CONTAINER_HIGHEST,
-            alignment=ft.Alignment.CENTER,
-        )
-        artwork_status = ft.Text(
-            "Встроенная обложка",
-            size=COMPACT_UI.font_xs,
-            color=ft.Colors.ON_SURFACE_VARIANT,
-            max_lines=2,
-        )
-        remove_artwork_button = ft.Button(
-            content="Удалить",
-            icon=ft.Icons.DELETE_OUTLINE,
-            disabled=(
-                not artwork_supported
-                or track.embedded_artwork_path is None
-                or not track.embedded_artwork_path.is_file()
-            ),
-        )
-
-        def set_artwork_preview(source: str | bytes | None) -> None:
-            if source is None:
-                artwork_box.content = ft.Icon(
-                    ft.Icons.IMAGE_OUTLINED,
-                    size=32,
-                    color=ft.Colors.ON_SURFACE_VARIANT,
-                )
-                return
-            artwork_box.content = ft.Image(
-                src=source,
-                width=116,
-                height=116,
-                fit=ft.BoxFit.COVER,
-                border_radius=COMPACT_UI.radius,
-                cache_width=232,
-                cache_height=232,
-                semantics_label="Встроенная обложка",
-            )
-
-        embedded = track.embedded_artwork_path
-        if embedded is not None and embedded.is_file():
-            set_artwork_preview(str(embedded))
-        else:
-            set_artwork_preview(None)
-            artwork_status.value = "Встроенной обложки нет"
-
-        async def choose_artwork(_: object) -> None:
-            try:
-                selected = await ft.FilePicker().pick_files(
-                    dialog_title="Выберите обложку",
-                    file_type=ft.FilePickerFileType.CUSTOM,
-                    allowed_extensions=["jpg", "jpeg", "png"],
-                    allow_multiple=False,
-                    with_data=True,
-                )
-            except Exception as exc:
-                LOGGER.exception("Ошибка выбора обложки")
-                self._notify(f"Не удалось выбрать обложку: {exc}")
-                return
-            if not selected:
-                return
-
-            picked = selected[0]
-            data = picked.bytes
-            if data is None and picked.path:
-                try:
-                    data = await self.workers.run(Path(picked.path).read_bytes)
-                except OSError as exc:
-                    self._notify(f"Не удалось прочитать обложку: {exc}")
-                    return
-            if not data:
-                self._notify("Не удалось получить данные обложки")
-                return
-
-            try:
-                prepared = self.service.prepare_artwork(data)
-            except RuntimeError as exc:
-                self._notify(str(exc))
-                return
-
-            artwork_state.changed = True
-            artwork_state.artwork = prepared
-            set_artwork_preview(prepared.data)
-            artwork_status.value = f"Будет записана: {picked.name}"
-            remove_artwork_button.disabled = False
-            self.page.update(
-                artwork_box,
-                artwork_status,
-                remove_artwork_button,
-            )
-
-        def remove_artwork(_: object) -> None:
-            artwork_state.changed = True
-            artwork_state.artwork = None
-            set_artwork_preview(None)
-            artwork_status.value = "Встроенная обложка будет удалена"
-            remove_artwork_button.disabled = True
-            self.page.update(
-                artwork_box,
-                artwork_status,
-                remove_artwork_button,
-            )
-
-        remove_artwork_button.on_click = remove_artwork
-        choose_artwork_button = ft.Button(
-            content="Заменить",
-            icon=ft.Icons.PHOTO_LIBRARY_OUTLINED,
-            disabled=not artwork_supported,
-            on_click=choose_artwork,
-        )
-
-        analysis_parts: list[str] = []
-        if track.analysis is not None:
-            if track.analysis.bpm is not None:
-                analysis_parts.append(f"{track.analysis.bpm:.1f} BPM")
-            key = " ".join(
-                part
-                for part in (
-                    track.analysis.musical_key,
-                    track.analysis.scale,
-                )
-                if part
-            )
-            if key:
-                analysis_parts.append(key)
-            if track.analysis.camelot:
-                analysis_parts.append(track.analysis.camelot)
-        analysis_label = " · ".join(analysis_parts) or "нет"
-        technical_label = " · ".join(
-            (
-                self._format_duration(track.technical.duration),
-                *self._track_detail_tags(track),
-            )
-        )
-
-        async def save(_: object) -> None:
-            try:
-                new_metadata = AudioMetadata(
-                    title=title.value or "",
-                    artist=artist.value or "",
-                    album=album.value or "",
-                    album_artist=album_artist.value or "",
-                    genre=genre.value or "",
-                    year=year.value or "",
-                    track_number=self._parse_int(track_no.value),
-                    disc_number=self._parse_int(disc_no.value),
-                    bpm=self._parse_float(bpm.value),
-                    musical_key=musical_key.value or "",
-                )
-            except ValueError as exc:
-                self._notify(str(exc))
-                return
-
-            self._set_busy(True, "Сохранение тегов...")
-            try:
-                await self.workers.run(
-                    self.service.update_tags,
-                    track_id,
-                    new_metadata,
-                    replace_artwork=artwork_state.changed,
-                    artwork=artwork_state.artwork,
-                )
-            except Exception as exc:
-                LOGGER.exception("Ошибка сохранения тегов")
-                self._notify(f"Не удалось сохранить теги: {exc}")
-            else:
-                self.page.pop_dialog()
-                self._notify("Теги сохранены")
-                self._selected_track_id = track_id
-                self.show_library()
-                self.page.run_task(self._select_library_track, track_id)
-            finally:
-                self._set_busy(False)
-
-        artwork_controls: list[ft.Control] = [
-            ft.Text(
-                "Встроенная обложка",
-                weight=ft.FontWeight.BOLD,
-                size=COMPACT_UI.font_sm,
-            ),
-            artwork_box,
-            artwork_status,
-            choose_artwork_button,
-            remove_artwork_button,
-        ]
-        if not artwork_supported:
-            artwork_controls.append(
-                ft.Text(
-                    "Запись обложки доступна для MP3, FLAC и M4A/MP4.",
-                    size=COMPACT_UI.font_micro,
-                    color=ft.Colors.ON_SURFACE_VARIANT,
-                )
-            )
-
-        fields = ft.Column(
-            controls=[
-                ft.Row(controls=[artist, title], spacing=COMPACT_UI.space_sm),
-                ft.Row(
-                    controls=[album_artist, album],
-                    spacing=COMPACT_UI.space_sm,
-                ),
-                ft.Row(
-                    controls=[genre, year, track_no, disc_no],
-                    spacing=COMPACT_UI.space_sm,
-                ),
-                ft.Row(
-                    controls=[bpm, musical_key],
-                    spacing=COMPACT_UI.space_sm,
-                ),
-                ft.Text(
-                    f"DSP-анализ: {analysis_label}",
-                    size=COMPACT_UI.font_xs,
-                    color=ft.Colors.ON_SURFACE_VARIANT,
-                ),
-                ft.Text(
-                    technical_label,
-                    size=COMPACT_UI.font_xs,
-                    color=ft.Colors.ON_SURFACE_VARIANT,
-                ),
-                ft.Text(
-                    str(track.path),
-                    size=COMPACT_UI.font_micro,
-                    color=ft.Colors.ON_SURFACE_VARIANT,
-                    max_lines=2,
-                    overflow=ft.TextOverflow.ELLIPSIS,
-                ),
-            ],
-            expand=True,
-            spacing=COMPACT_UI.space_sm,
-        )
-
-        dialog = ft.AlertDialog(
-            modal=True,
-            title=ft.Text(track.path.name),
-            content=ft.Container(
-                width=760,
-                content=ft.Row(
-                    controls=[
-                        ft.Column(
-                            controls=artwork_controls,
-                            width=150,
-                            spacing=COMPACT_UI.space_sm,
-                            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                        ),
-                        fields,
-                    ],
-                    spacing=COMPACT_UI.space_md,
-                    vertical_alignment=ft.CrossAxisAlignment.START,
-                ),
-            ),
-            actions=[
-                ft.Button(
-                    content="Отмена",
-                    on_click=lambda _: self.page.pop_dialog(),
-                ),
-                ft.Button(
-                    content="Сохранить",
-                    icon=ft.Icons.SAVE_OUTLINED,
-                    on_click=save,
-                ),
-            ],
-        )
-        self.page.show_dialog(dialog)
+        self.library_search.open_tag_editor(track_id)
 
     def _open_organizer(self, track_id: int) -> None:
-        destination = ft.TextField(
-            label="Корневая папка назначения",
-            expand=True,
-            dense=True,
-            text_size=COMPACT_UI.font_sm,
-        )
-        template = ft.TextField(
-            label="Шаблон",
-            value=DEFAULT_ORGANIZE_TEMPLATE,
-            dense=True,
-            text_size=COMPACT_UI.font_sm,
-        )
-
-        async def choose(_: object) -> None:
-            try:
-                selected = await ft.FilePicker().get_directory_path(dialog_title="Папка назначения")
-            except Exception as exc:
-                LOGGER.exception("Ошибка выбора папки назначения")
-                self._notify(f"Не удалось выбрать папку: {exc}")
-                return
-            if selected:
-                destination.value = selected
-                destination.update()
-
-        async def execute(_: object) -> None:
-            if not destination.value:
-                self._notify("Выберите папку назначения")
-                return
-            self._set_busy(True, "Перенос файла...")
-            try:
-                updated = await self.workers.run(
-                    self.service.organize_track,
-                    track_id,
-                    Path(destination.value),
-                    template.value or DEFAULT_ORGANIZE_TEMPLATE,
-                )
-            except Exception as exc:
-                LOGGER.exception("Ошибка организации файла")
-                self._notify(f"Не удалось организовать файл: {exc}")
-            else:
-                self.page.pop_dialog()
-                self._notify(f"Файл перемещён: {updated.path}")
-                self.show_library()
-            finally:
-                self._set_busy(False)
-
-        dialog = ft.AlertDialog(
-            modal=True,
-            title=ft.Text("Организация файла"),
-            content=ft.Column(
-                controls=[
-                    ft.Row(
-                        controls=[
-                            destination,
-                            ft.Button(content="Выбрать", icon=ft.Icons.FOLDER_OPEN, on_click=choose),
-                        ]
-                    ),
-                    template,
-                    ft.Text("Доступно: artist, album, album_artist, title, year, track, disc, ext"),
-                ],
-                tight=True,
-            ),
-            actions=[
-                ft.Button(content="Отмена", on_click=lambda _: self.page.pop_dialog()),
-                ft.Button(content="Переместить", icon=ft.Icons.DRIVE_FILE_MOVE_OUTLINED, on_click=execute),
-            ],
-        )
-        self.page.show_dialog(dialog)
+        self.library_search.open_organizer(track_id)
 
     def _start_metadata_search(self, track_id: int) -> None:
         self.track_row.start_metadata_search(track_id)
 
     async def _metadata_search(self, track_id: int) -> None:
-        self._set_busy(True, "Поиск в MusicBrainz...")
-        try:
-            candidates = await self.workers.run(self.service.search_metadata, track_id, "musicbrainz", 8)
-        except (MetadataProviderError, RuntimeError, OSError) as exc:
-            LOGGER.exception("Ошибка онлайн-поиска")
-            self._notify(f"Ошибка поиска метаданных: {exc}")
-        else:
-            self._open_candidates(track_id, candidates)
-        finally:
-            self._set_busy(False)
+        await self.library_search.metadata_search(track_id)
 
     def _open_candidates(self, track_id: int, candidates: list[MetadataCandidate]) -> None:
-        if not candidates:
-            self._notify("MusicBrainz не нашёл подходящих вариантов")
-            return
-
-        rows: list[ft.Control] = []
-        dialog: ft.AlertDialog
-
-        for candidate in candidates:
-            async def apply(_: object, value: MetadataCandidate = candidate) -> None:
-                self._set_busy(True, "Применение метаданных...")
-                try:
-                    await self.workers.run(self.service.apply_candidate, track_id, value)
-                except Exception as exc:
-                    LOGGER.exception("Ошибка применения онлайн-метаданных")
-                    self._notify(f"Не удалось применить метаданные: {exc}")
-                else:
-                    self.page.pop_dialog()
-                    self._notify("Метаданные применены")
-                    self.show_library()
-                finally:
-                    self._set_busy(False)
-
-            rows.append(
-                self._surface_card(
-                    ft.Row(
-                        controls=[
-                            ft.Column(
-                                controls=[
-                                    ft.Text(candidate.title, weight=ft.FontWeight.BOLD),
-                                    ft.Text(f"{candidate.artist} · {candidate.album} · {candidate.year}"),
-                                ],
-                                expand=True,
-                            ),
-                            ft.Button(content="Применить", on_click=apply),
-                        ]
-                    ),
-                    padding=5,
-                )
-            )
-
-        dialog = ft.AlertDialog(
-            modal=True,
-            title=ft.Text("Результаты MusicBrainz"),
-            content=ft.Column(controls=rows, scroll=ft.ScrollMode.AUTO, height=500, width=760),
-            actions=[ft.Button(content="Закрыть", on_click=lambda _: self.page.pop_dialog())],
-        )
-        self.page.show_dialog(dialog)
+        self.library_search.open_candidates(track_id, candidates)
 
     @staticmethod
     def _parse_int(value: str | None) -> int | None:
-        if value is None or not value.strip():
-            return None
-        try:
-            return int(value.strip())
-        except ValueError as exc:
-            raise ValueError(f"Ожидалось целое число: {value}") from exc
+        return LibrarySearchController.parse_int(value)
 
     @staticmethod
     def _parse_float(value: str | None) -> float | None:
-        if value is None or not value.strip():
-            return None
-        try:
-            return float(value.strip().replace(",", "."))
-        except ValueError as exc:
-            raise ValueError(f"Некорректный BPM: {value}") from exc
+        return LibrarySearchController.parse_float(value)
 
     @staticmethod
     def _format_duration(seconds: float | None) -> str:

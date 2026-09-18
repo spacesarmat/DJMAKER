@@ -20,6 +20,9 @@ from djmaker.services.library import LibraryService
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 UI_SOURCE = PROJECT_ROOT / "src" / "djmaker" / "ui" / "app.py"
 TRACK_ROW_SOURCE = PROJECT_ROOT / "src" / "djmaker" / "ui" / "track_row_controls.py"
+LIBRARY_SEARCH_SOURCE = (
+    PROJECT_ROOT / "src" / "djmaker" / "ui" / "library_search_controls.py"
+)
 LIBRARY_SOURCE = PROJECT_ROOT / "src" / "djmaker" / "services" / "library.py"
 
 
@@ -36,7 +39,7 @@ class TagEditorUITests(unittest.TestCase):
         self.assertIn("self.reveal_track_file(current)", track_row_source)
 
     def test_editor_contains_full_metadata_fields_and_embedded_artwork(self) -> None:
-        source = UI_SOURCE.read_text(encoding="utf-8")
+        source = LIBRARY_SEARCH_SOURCE.read_text(encoding="utf-8")
 
         for label in (
             'label="Название"',
@@ -56,7 +59,7 @@ class TagEditorUITests(unittest.TestCase):
         self.assertIn('content="Заменить"', source)
         self.assertIn('content="Удалить"', source)
         self.assertIn('allowed_extensions=["jpg", "jpeg", "png"]', source)
-        self.assertIn("self.service.prepare_artwork(data)", source)
+        self.assertIn("app.service.prepare_artwork(data)", source)
         self.assertIn("replace_artwork=artwork_state.changed", source)
         self.assertIn("artwork=artwork_state.artwork", source)
         self.assertIn('f"DSP-анализ: {analysis_label}"', source)

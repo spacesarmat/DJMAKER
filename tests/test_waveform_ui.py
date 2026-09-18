@@ -78,7 +78,7 @@ class WaveformUITests(unittest.TestCase):
         self.assertIn("app._player_load_event.wait()", track_selection_source)
         self.assertIn("def _commit_player_track", source)
         self.assertIn("if app._player_switching:\n            return", player_source)
-        self.assertIn("self._player_request_revision += 1", source)
+        self.assertIn("app._player_request_revision += 1", player_source)
         self.assertNotIn("_player_pending_position_ms", source)
 
     def test_track_metadata_is_rendered_in_three_requested_lines(self) -> None:

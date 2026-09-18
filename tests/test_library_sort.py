@@ -17,6 +17,7 @@ from djmaker.services.audio_analysis import camelot_code
 from djmaker.services.library import LibraryService
 from djmaker.settings import AppSettings, SettingsStore
 from djmaker.ui.app import DJMakerUI
+from djmaker.ui.library_search_controls import LibrarySearchController
 
 
 class LibrarySortDatabaseTests(unittest.TestCase):
@@ -169,6 +170,7 @@ class LibrarySortUITests(unittest.TestCase):
         self.ui.settings = AppSettings()
         self.ui.settings_store = Mock()
         self.ui.page = Mock()
+        self.ui.library_search = LibrarySearchController(self.ui)
         self.ui.show_library = Mock()
         self.ui._notify = Mock()
         self.ui._search_revision = 10

@@ -49,9 +49,12 @@ class LibraryScrollingTests(unittest.TestCase):
     def test_library_uses_fixed_extent_and_smooth_scroll(self) -> None:
         source = UI_SOURCE.read_text(encoding="utf-8")
         track_selection_source = TRACK_SELECTION_SOURCE.read_text(encoding="utf-8")
+        library_search_source = (
+            PROJECT_ROOT / "src" / "djmaker" / "ui" / "library_search_controls.py"
+        ).read_text(encoding="utf-8")
 
-        self.assertIn("item_extent=self._track_item_extent()", source)
-        self.assertIn("on_scroll=self._on_library_scroll", source)
+        self.assertIn("item_extent=app._track_item_extent()", library_search_source)
+        self.assertIn("on_scroll=app._on_library_scroll", library_search_source)
         self.assertIn("await listing.scroll_to(", track_selection_source)
         self.assertIn(
             "duration=COMPACT_UI.track_center_scroll_ms", track_selection_source
@@ -61,11 +64,14 @@ class LibraryScrollingTests(unittest.TestCase):
 
     def test_track_row_can_be_selected_by_tapping_row(self) -> None:
         source = UI_SOURCE.read_text(encoding="utf-8")
+        track_row_source = (
+            PROJECT_ROOT / "src" / "djmaker" / "ui" / "track_row_controls.py"
+        ).read_text(encoding="utf-8")
 
         self.assertIn("self._selected_track_id", source)
         self.assertIn("self._track_row_cards", source)
         self.assertIn("self._select_library_track", source)
-        self.assertIn("ft.Colors.SURFACE_CONTAINER_HIGH", source)
+        self.assertIn("ft.Colors.SURFACE_CONTAINER_HIGH", track_row_source)
 
 
 if __name__ == "__main__":

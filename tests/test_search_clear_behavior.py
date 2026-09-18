@@ -11,6 +11,7 @@ import flet as ft
 
 from djmaker.settings import AppSettings
 from djmaker.ui.app import DJMakerUI
+from djmaker.ui.library_search_controls import LibrarySearchController
 from djmaker.ui.navigation_cards_controls import NavigationCardsController
 from djmaker.ui.track_row_controls import TrackRowController
 
@@ -24,8 +25,10 @@ class SearchClearBehaviorTests(unittest.IsolatedAsyncioTestCase):
         self.ui.navigation = SimpleNamespace(selected_index=0)
         self.ui.navigation_cards = NavigationCardsController(self.ui)
         self.ui.track_row = TrackRowController(self.ui)
+        self.ui.library_search = LibrarySearchController(self.ui)
         self.ui._search_revision = 0
         self.ui.show_library = Mock()
+        self.ui.library_search.show_library = self.ui.show_library
 
     async def test_clear_invalidates_search_already_waiting_for_debounce(self) -> None:
         ui = self.ui
@@ -88,6 +91,7 @@ class SearchClearBehaviorTests(unittest.IsolatedAsyncioTestCase):
     def test_clear_queries_full_library_and_updates_only_content(self) -> None:
         ui = self.ui
         del ui.show_library
+        del ui.library_search.show_library
         ui.service = Mock()
         ui.service.tracks.return_value = [
             SimpleNamespace(id=1), SimpleNamespace(id=2)
