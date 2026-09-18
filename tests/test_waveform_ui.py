@@ -11,6 +11,9 @@ PLAYER_SOURCE = PROJECT_ROOT / "src" / "djmaker" / "ui" / "player_controls.py"
 TRACK_SELECTION_SOURCE = (
     PROJECT_ROOT / "src" / "djmaker" / "ui" / "track_selection_controls.py"
 )
+TASK_PROGRESS_SOURCE = (
+    PROJECT_ROOT / "src" / "djmaker" / "ui" / "task_progress_controls.py"
+)
 PYPROJECT = PROJECT_ROOT / "pyproject.toml"
 
 
@@ -55,7 +58,9 @@ class WaveformUITests(unittest.TestCase):
         self.assertIn("app.page.update(*controls)", player_source)
         self.assertIn("dict[int, _WaveformView]", source)
         self.assertIn("played == view.played_bars", player_source)
-        self.assertIn("concurrency = min(1,", source)
+        self.assertIn(
+            "concurrency = min(1,", TASK_PROGRESS_SOURCE.read_text(encoding="utf-8")
+        )
 
 
     def test_track_switch_waits_for_loaded_source_and_ignores_stale_events(self) -> None:
@@ -91,8 +96,13 @@ class WaveformUITests(unittest.TestCase):
         ).read_text(encoding="utf-8")
 
         self.assertIn("page.run_task(ui.ensure_waveforms)", source)
-        self.assertIn("TaskKind.WAVEFORM_ANALYSIS", ui)
-        self.assertIn("self._run_waveform_analysis", ui)
+        self.assertIn(
+            "TaskKind.WAVEFORM_ANALYSIS", TASK_PROGRESS_SOURCE.read_text(encoding="utf-8")
+        )
+        self.assertIn(
+            "self.run_waveform_analysis",
+            TASK_PROGRESS_SOURCE.read_text(encoding="utf-8"),
+        )
         self.assertIn("app.page.run_task(app.ensure_waveforms)", drop_source)
 
 

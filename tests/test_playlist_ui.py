@@ -17,6 +17,7 @@ from djmaker.infrastructure.set_timeline import SetTimelineRepository
 from djmaker.services.tasks import TaskManager, TaskPaused, TaskStatus
 from djmaker.settings import AppSettings
 from djmaker.ui.app import DJMakerUI
+from djmaker.ui.task_progress_controls import TaskProgressController
 
 
 class PlaylistUIFlowTests(unittest.IsolatedAsyncioTestCase):
@@ -76,12 +77,15 @@ class PlaylistUIFlowTests(unittest.IsolatedAsyncioTestCase):
         ):
             setattr(ui, name, {})
         ui.tasks = TaskManager()
+        ui.task_progress = TaskProgressController(ui)
         ui._notify = Mock()
         ui.show_library = Mock()
         ui._refresh_task_indicator = Mock()
+        ui.task_progress.refresh_task_indicator = Mock()
         ui.show_tasks = Mock(
             side_effect=lambda: setattr(ui.navigation, "selected_index", 5)
         )
+        ui.task_progress.show_tasks = ui.show_tasks
 
         async def run(func, *args, **kwargs):
             return func(*args, **kwargs)

@@ -8,6 +8,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 UI_SOURCE = PROJECT_ROOT / "src" / "djmaker" / "ui" / "app.py"
 APP_SOURCE = PROJECT_ROOT / "src" / "djmaker" / "app.py"
 ANALYZER_SOURCE = PROJECT_ROOT / "src" / "djmaker" / "services" / "audio_analysis.py"
+TASK_PROGRESS_SOURCE = (
+    PROJECT_ROOT / "src" / "djmaker" / "ui" / "task_progress_controls.py"
+)
 
 
 class TaskUITests(unittest.TestCase):
@@ -24,12 +27,13 @@ class TaskUITests(unittest.TestCase):
 
     def test_long_operations_are_registered_as_managed_tasks(self) -> None:
         source = UI_SOURCE.read_text(encoding="utf-8")
+        task_progress_source = TASK_PROGRESS_SOURCE.read_text(encoding="utf-8")
 
         self.assertIn("TaskKind.AUDIO_ANALYSIS", source)
-        self.assertIn("TaskKind.LIBRARY_SCAN", source)
-        self.assertIn("TaskKind.ARTWORK_INDEX", source)
-        self.assertIn("TaskKind.WAVEFORM_ANALYSIS", source)
-        self.assertIn("task=task", source)
+        self.assertIn("TaskKind.LIBRARY_SCAN", task_progress_source)
+        self.assertIn("TaskKind.ARTWORK_INDEX", task_progress_source)
+        self.assertIn("TaskKind.WAVEFORM_ANALYSIS", task_progress_source)
+        self.assertIn("task=task", task_progress_source)
 
     def test_task_monitor_is_started_with_application(self) -> None:
         source = APP_SOURCE.read_text(encoding="utf-8")
