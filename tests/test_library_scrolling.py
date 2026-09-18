@@ -10,6 +10,9 @@ from djmaker.ui.scrolling import centered_scroll_offset
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 UI_SOURCE = PROJECT_ROOT / "src" / "djmaker" / "ui" / "app.py"
+TRACK_SELECTION_SOURCE = (
+    PROJECT_ROOT / "src" / "djmaker" / "ui" / "track_selection_controls.py"
+)
 
 
 class LibraryScrollingTests(unittest.TestCase):
@@ -45,13 +48,16 @@ class LibraryScrollingTests(unittest.TestCase):
 
     def test_library_uses_fixed_extent_and_smooth_scroll(self) -> None:
         source = UI_SOURCE.read_text(encoding="utf-8")
+        track_selection_source = TRACK_SELECTION_SOURCE.read_text(encoding="utf-8")
 
         self.assertIn("item_extent=self._track_item_extent()", source)
         self.assertIn("on_scroll=self._on_library_scroll", source)
-        self.assertIn("await listing.scroll_to(", source)
-        self.assertIn("duration=COMPACT_UI.track_center_scroll_ms", source)
-        self.assertIn("ft.AnimationCurve.EASE_IN_OUT_CUBIC", source)
-        self.assertIn("centered_scroll_offset(", source)
+        self.assertIn("await listing.scroll_to(", track_selection_source)
+        self.assertIn(
+            "duration=COMPACT_UI.track_center_scroll_ms", track_selection_source
+        )
+        self.assertIn("ft.AnimationCurve.EASE_IN_OUT_CUBIC", track_selection_source)
+        self.assertIn("centered_scroll_offset(", track_selection_source)
 
     def test_track_row_can_be_selected_by_tapping_row(self) -> None:
         source = UI_SOURCE.read_text(encoding="utf-8")

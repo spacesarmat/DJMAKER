@@ -61,6 +61,7 @@ from djmaker.ui.drop_import_controls import DropImportController
 from djmaker.ui.player_controls import PlayerControlsController
 from djmaker.ui.playlists import PlaylistUI
 from djmaker.ui.scrolling import centered_scroll_offset
+from djmaker.ui.track_selection_controls import TrackSelectionController
 from djmaker.ui.theme import (
     THEME_MODE_LABELS,
     THEME_PALETTES,
@@ -280,6 +281,7 @@ class DJMakerUI(BeatGridEditorUI, PlaylistUI):
         self.navigation = self._build_navigation()
         self._drop_overlay = self._build_drop_overlay()
         self.drop_import = DropImportController(self)
+        self.track_selection = TrackSelectionController(self)
 
     def build(self) -> None:
         """Строит главное окно приложения."""
@@ -442,29 +444,11 @@ class DJMakerUI(BeatGridEditorUI, PlaylistUI):
         track: TrackRecord,
     ) -> tuple[fta.Audio, bool, bool]:
         """Лениво создаёт Audio service и сообщает о смене source."""
-        return self._ensure_audio_path(track.path)
+        return self.track_selection.ensure_audio_service(track)
 
     def _ensure_audio_path(self, path: Path) -> tuple[fta.Audio, bool, bool]:
         """Подключает обычный трек или созданный локальный preview."""
-        source = path.expanduser().resolve()
-        created = self.audio is None
-        source_changed = created or self._player_track_path != source
-        if self.audio is None:
-            self.audio = fta.Audio(
-                src=str(source),
-                autoplay=False,
-                release_mode=fta.ReleaseMode.STOP,
-                on_loaded=self._on_player_loaded,
-                on_duration_change=self._on_player_duration_change,
-                on_position_change=self._on_player_position_change,
-                on_state_change=self._on_player_state_change,
-            )
-            self.page.services.append(self.audio)
-            self._player_track_path = source
-        elif source_changed:
-            self.audio.src = str(source)
-            self._player_track_path = source
-        return self.audio, source_changed, created
+        return self.track_selection.ensure_audio_path(path)
 
     async def _play_external_audio(self, source: Path, title: str) -> None:
         """Воспроизводит локальный preview без добавления его в медиатеку."""
@@ -486,88 +470,7 @@ class DJMakerUI(BeatGridEditorUI, PlaylistUI):
 
     async def _play_track(self, track_id: int, position_ms: int = 0) -> None:
         """Выбирает трек и плавно запускает его с нужной позиции."""
-        self._player_request_revision += 1
-        request_revision = self._player_request_revision
-        await self._select_library_track(track_id)
-        if request_revision != self._player_request_revision:
-            return
-
-        started_switch = False
-        try:
-            track = await self.workers.run(self.service.track, track_id)
-            if request_revision != self._player_request_revision:
-                return
-            if not track.path.is_file():
-                raise RuntimeError(f"Файл не найден: {track.path}")
-
-            async with self._player_switch_lock:
-                if request_revision != self._player_request_revision:
-                    return
-
-                source = track.path.expanduser().resolve()
-                source_changed = self.audio is None or self._player_track_path != source
-                target_position_ms = max(0, position_ms)
-
-                if source_changed:
-                    started_switch = True
-                    self._player_switching = True
-                    if self.audio is not None:
-                        try:
-                            await self.audio.pause()
-                        except Exception:
-                            LOGGER.debug(
-                                "Не удалось приостановить предыдущий source",
-                                exc_info=True,
-                            )
-                    if request_revision != self._player_request_revision:
-                        return
-
-                    self._player_load_event = asyncio.Event()
-                    audio, _, audio_created = self._ensure_audio_service(track)
-                    if audio_created:
-                        # Первый Audio service нужно смонтировать в дерево страницы.
-                        self.page.update()
-                    else:
-                        audio.update()
-
-                    await asyncio.wait_for(
-                        self._player_load_event.wait(),
-                        timeout=_PLAYER_SOURCE_LOAD_TIMEOUT_SECONDS,
-                    )
-                    if request_revision != self._player_request_revision:
-                        return
-                else:
-                    audio, _, _ = self._ensure_audio_service(track)
-
-                waveform_updates = self._commit_player_track(
-                    track,
-                    target_position_ms,
-                )
-                self.page.update(
-                    self.player_bar,
-                    self.player_title,
-                    self.player_play_button,
-                    self.player_position,
-                    self.player_progress,
-                    *waveform_updates,
-                )
-                if started_switch:
-                    self._player_switching = False
-                    self._player_load_event = None
-                    started_switch = False
-                await audio.play(
-                    position=ft.Duration(milliseconds=target_position_ms)
-                )
-        except TimeoutError:
-            LOGGER.error("Audio source не загрузился вовремя: track_id=%s", track_id)
-            self._notify("Плеер не успел загрузить выбранный файл")
-        except Exception as exc:
-            LOGGER.exception("Не удалось воспроизвести трек %s", track_id)
-            self._notify(f"Не удалось воспроизвести файл: {exc}")
-        finally:
-            if started_switch:
-                self._player_switching = False
-                self._player_load_event = None
+        await self.track_selection.play_track(track_id, position_ms)
 
     async def _toggle_player(self, _: object) -> None:
         if self.audio is None:
@@ -1481,10 +1384,7 @@ class DJMakerUI(BeatGridEditorUI, PlaylistUI):
 
     def _estimated_library_viewport_extent(self) -> float:
         """Оценивает viewport до первого scroll-event от Flutter-клиента."""
-        item_extent = self._track_item_extent()
-        page_height = float(self.page.height or self.page.window.height or 640)
-        reserved = 150 if self.player_bar.visible else 115
-        return max(item_extent * 3, page_height - reserved)
+        return self.track_selection.estimated_library_viewport_extent()
 
     def _on_library_scroll(self, event: ft.OnScrollEvent) -> None:
         """Запоминает реальные метрики ListView для точной центровки."""
@@ -1493,50 +1393,7 @@ class DJMakerUI(BeatGridEditorUI, PlaylistUI):
 
     async def _select_library_track(self, track_id: int) -> None:
         """Выделяет трек и плавно размещает его по центру списка."""
-        previous_id = self._selected_track_id
-        self._selected_track_id = track_id
-
-        listing = self._library_list
-        index = self._library_track_indices.get(track_id)
-        if listing is None or index is None or self.navigation.selected_index != 0:
-            return
-
-        updates: list[ft.Control] = []
-        if previous_id is not None and previous_id != track_id:
-            previous_card = self._track_row_cards.get(previous_id)
-            if previous_card is not None:
-                previous_card.bgcolor = ft.Colors.SURFACE_CONTAINER_LOW
-                updates.append(previous_card)
-
-        current_card = self._track_row_cards.get(track_id)
-        if current_card is not None:
-            current_card.bgcolor = ft.Colors.SURFACE_CONTAINER_HIGH
-            updates.append(current_card)
-        if updates:
-            self.page.update(*updates)
-
-        item_extent = self._track_item_extent()
-        viewport = (
-            self._library_viewport_extent
-            if self._library_viewport_extent > 0
-            else self._estimated_library_viewport_extent()
-        )
-        estimated_max = max(
-            0.0,
-            len(self._library_track_indices) * item_extent - viewport,
-        )
-        max_scroll = max(self._library_max_scroll_extent, estimated_max)
-        offset = centered_scroll_offset(
-            index=index,
-            item_extent=item_extent,
-            viewport_extent=viewport,
-            max_scroll_extent=max_scroll,
-        )
-        await listing.scroll_to(
-            offset=offset,
-            duration=COMPACT_UI.track_center_scroll_ms,
-            curve=ft.AnimationCurve.EASE_IN_OUT_CUBIC,
-        )
+        await self.track_selection.select_library_track(track_id)
 
     def _track_row(self, track: TrackRecord) -> ft.Control:
         metadata_block = ft.Column(
