@@ -6,6 +6,7 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 UI_SOURCE = PROJECT_ROOT / "src" / "djmaker" / "ui" / "app.py"
+TRACK_ROW_SOURCE = PROJECT_ROOT / "src" / "djmaker" / "ui" / "track_row_controls.py"
 
 
 class LibraryScaleUITests(unittest.TestCase):
@@ -20,12 +21,17 @@ class LibraryScaleUITests(unittest.TestCase):
 
     def test_track_geometry_uses_library_scale(self) -> None:
         source = UI_SOURCE.read_text(encoding="utf-8")
+        track_row_source = TRACK_ROW_SOURCE.read_text(encoding="utf-8")
 
         self.assertIn("def _library_size", source)
-        self.assertIn("self.settings.library_scale_percent", source)
-        self.assertIn("self._library_size(COMPACT_UI.track_icon_box)", source)
-        self.assertIn("self._library_size(COMPACT_UI.waveform_height)", source)
-        self.assertIn("self._waveform_width()", source)
+        self.assertIn("self.app.settings.library_scale_percent", track_row_source)
+        self.assertIn(
+            "self.library_size(COMPACT_UI.track_icon_box)", track_row_source
+        )
+        self.assertIn(
+            "self.library_size(COMPACT_UI.waveform_height)", track_row_source
+        )
+        self.assertIn("self.waveform_width()", track_row_source)
         self.assertIn("item_extent=self._track_item_extent()", source)
 
     def test_scale_change_recenters_selected_track(self) -> None:

@@ -19,19 +19,21 @@ from djmaker.services.library import LibraryService
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 UI_SOURCE = PROJECT_ROOT / "src" / "djmaker" / "ui" / "app.py"
+TRACK_ROW_SOURCE = PROJECT_ROOT / "src" / "djmaker" / "ui" / "track_row_controls.py"
 LIBRARY_SOURCE = PROJECT_ROOT / "src" / "djmaker" / "services" / "library.py"
 
 
 class TagEditorUITests(unittest.TestCase):
     def test_double_click_on_track_opens_existing_tag_editor(self) -> None:
         source = UI_SOURCE.read_text(encoding="utf-8")
+        track_row_source = TRACK_ROW_SOURCE.read_text(encoding="utf-8")
 
         self.assertIn(
-            "on_double_tap=lambda _, track_id=track.id: self._open_tag_editor(",
-            source,
+            "on_double_tap=lambda _, track_id=track.id: app._open_tag_editor(",
+            track_row_source,
         )
         self.assertIn("def _open_tag_editor(self, track_id: int) -> None:", source)
-        self.assertIn("self._reveal_track_file(current)", source)
+        self.assertIn("self.reveal_track_file(current)", track_row_source)
 
     def test_editor_contains_full_metadata_fields_and_embedded_artwork(self) -> None:
         source = UI_SOURCE.read_text(encoding="utf-8")

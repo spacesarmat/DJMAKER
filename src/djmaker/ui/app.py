@@ -68,6 +68,7 @@ from djmaker.ui.task_progress_controls import (
     _BatchTaskContext,
     _WaveformTaskContext,
 )
+from djmaker.ui.track_row_controls import TrackRowController, _WaveformView
 from djmaker.ui.track_selection_controls import TrackSelectionController
 from djmaker.ui.theme import (
     THEME_MODE_LABELS,
@@ -103,13 +104,6 @@ _THEME_ROLE_LABELS = {
     "outline_variant": "Мягкий контур",
     "error": "Ошибка",
 }
-
-
-@dataclass(slots=True)
-class _WaveformView:
-    peaks: tuple[float, ...]
-    progress_image: ft.Image
-    played_bars: int
 
 
 @dataclass(slots=True)
@@ -271,6 +265,7 @@ class DJMakerUI(BeatGridEditorUI, PlaylistUI):
         self.track_selection = TrackSelectionController(self)
         self.task_progress = TaskProgressController(self)
         self.navigation_cards = NavigationCardsController(self)
+        self.track_row = TrackRowController(self)
 
     def build(self) -> None:
         """Строит главное окно приложения."""
@@ -428,13 +423,10 @@ class DJMakerUI(BeatGridEditorUI, PlaylistUI):
 
     @staticmethod
     def _base_waveform_width() -> int:
-        return (
-            COMPACT_UI.waveform_bar_count * COMPACT_UI.waveform_bar_width
-            + (COMPACT_UI.waveform_bar_count - 1) * COMPACT_UI.waveform_bar_gap
-        )
+        return TrackRowController.base_waveform_width()
 
     def _waveform_width(self) -> float:
-        return self._library_size(self._base_waveform_width())
+        return self.track_row.waveform_width()
 
     @staticmethod
     def _waveform_svg(
@@ -442,41 +434,10 @@ class DJMakerUI(BeatGridEditorUI, PlaylistUI):
         played_bars: int | None = None,
     ) -> str:
         """Рисует waveform одним SVG вместо десятков Flet-контролов."""
-        width = DJMakerUI._base_waveform_width()
-        height = COMPACT_UI.waveform_height
-        limit = len(peaks) if played_bars is None else max(0, played_bars)
-        rectangles: list[str] = []
-        for index, peak in enumerate(peaks[:limit]):
-            normalized = min(1.0, max(0.0, float(peak)))
-            bar_height = max(
-                COMPACT_UI.waveform_min_bar_height,
-                round(height * normalized),
-            )
-            x = index * (COMPACT_UI.waveform_bar_width + COMPACT_UI.waveform_bar_gap)
-            y = height - bar_height
-            rectangles.append(
-                f'<rect x="{x}" y="{y}" width="{COMPACT_UI.waveform_bar_width}" '
-                f'height="{bar_height}" rx="1" fill="#000"/>'
-            )
-        return (
-            f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" '
-            f'height="{height}" viewBox="0 0 {width} {height}">'
-            f'{"".join(rectangles)}</svg>'
-        )
+        return TrackRowController.waveform_svg(peaks, played_bars)
 
     def _play_from_waveform(self, event: ft.TapEvent, track: TrackRecord) -> None:
-        if event.local_position is None:
-            return
-        duration = track.technical.duration or 0.0
-        if duration <= 0:
-            self._notify("Для seek недоступна продолжительность трека")
-            return
-        fraction = min(
-            1.0,
-            max(0.0, event.local_position.x / self._waveform_width()),
-        )
-        position_ms = int(duration * fraction * 1000)
-        self.page.run_task(self._play_track, track.id, position_ms)
+        self.track_row.play_from_waveform(event, track)
 
     def _refresh_waveform_progress(self) -> ft.Control | None:
         return self.player.refresh_waveform_progress()
@@ -882,11 +843,7 @@ class DJMakerUI(BeatGridEditorUI, PlaylistUI):
         minimum: float = 1.0,
     ) -> float:
         """Возвращает размер элемента строки с учётом масштаба медиатеки."""
-        return scaled_library_size(
-            value,
-            self.settings.library_scale_percent,
-            minimum=minimum,
-        )
+        return self.track_row.library_size(value, minimum=minimum)
 
     def _library_scale_control(self) -> ft.Control:
         """Строит компактное управление масштабом строк медиатеки."""
@@ -1046,11 +1003,7 @@ class DJMakerUI(BeatGridEditorUI, PlaylistUI):
 
     def _track_item_extent(self) -> float:
         """Высота строки медиатеки с учётом пользовательского масштаба."""
-        return (
-            self._library_size(COMPACT_UI.track_icon_box)
-            + self._library_size(COMPACT_UI.card_padding) * 2
-            + self._library_size(COMPACT_UI.space_sm)
-        )
+        return self.track_row.track_item_extent()
 
     def _estimated_library_viewport_extent(self) -> float:
         """Оценивает viewport до первого scroll-event от Flutter-клиента."""
@@ -1066,203 +1019,19 @@ class DJMakerUI(BeatGridEditorUI, PlaylistUI):
         await self.track_selection.select_library_track(track_id)
 
     def _track_row(self, track: TrackRecord) -> ft.Control:
-        metadata_block = ft.Column(
-            controls=[
-                self._track_title_row(track),
-                self._track_details_row(track),
-                self._track_path_link(track),
-            ],
-            expand=True,
-            height=self._library_size(COMPACT_UI.track_icon_box),
-            spacing=0,
-            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-        )
-        card = self._surface_card(
-            ft.Row(
-                controls=[
-                    self._library_selection_checkbox(track.id),
-                    self._track_artwork(track),
-                    metadata_block,
-                    self._track_waveform(track),
-                    self._playlist_track_menu(track.id),
-                    ft.IconButton(
-                        icon=ft.Icons.GRID_ON_OUTLINED,
-                        icon_size=self._library_size(COMPACT_UI.action_icon_size),
-                        padding=self._library_size(COMPACT_UI.space_xs),
-                        visual_density=ft.VisualDensity.COMPACT,
-                        tooltip="Редактировать BPM-сетку",
-                        disabled=(
-                            track.analysis is None
-                            or track.analysis.beat_grid is None
-                        ),
-                        on_click=lambda _, track_id=track.id: (
-                            self._open_beat_grid_editor(track_id)
-                        ),
-                    ),
-                    ft.IconButton(
-                        icon=ft.Icons.EDIT_OUTLINED,
-                        icon_size=self._library_size(COMPACT_UI.action_icon_size),
-                        padding=self._library_size(COMPACT_UI.space_xs),
-                        visual_density=ft.VisualDensity.COMPACT,
-                        tooltip="Редактировать теги",
-                        on_click=lambda _, track_id=track.id: self._open_tag_editor(
-                            track_id
-                        ),
-                    ),
-                    ft.IconButton(
-                        icon=ft.Icons.DRIVE_FILE_MOVE_OUTLINED,
-                        icon_size=self._library_size(COMPACT_UI.action_icon_size),
-                        padding=self._library_size(COMPACT_UI.space_xs),
-                        visual_density=ft.VisualDensity.COMPACT,
-                        tooltip="Организовать файл",
-                        on_click=lambda _, track_id=track.id: self._open_organizer(
-                            track_id
-                        ),
-                    ),
-                    ft.IconButton(
-                        icon=ft.Icons.SEARCH,
-                        icon_size=self._library_size(COMPACT_UI.action_icon_size),
-                        padding=self._library_size(COMPACT_UI.space_xs),
-                        visual_density=ft.VisualDensity.COMPACT,
-                        tooltip="Найти метаданные",
-                        on_click=lambda _, track_id=track.id: (
-                            self._start_metadata_search(track_id)
-                        ),
-                    ),
-                ],
-                vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                spacing=self._library_size(COMPACT_UI.space_sm),
-            ),
-            padding=self._library_size(COMPACT_UI.card_padding),
-        )
-        card.bgcolor = (
-            ft.Colors.SURFACE_CONTAINER_HIGH
-            if self._selected_track_id == track.id
-            else ft.Colors.SURFACE_CONTAINER_LOW
-        )
-        self._track_row_cards[track.id] = card
-        return ft.Container(
-            height=self._track_item_extent(),
-            padding=ft.Padding.only(
-                bottom=self._library_size(COMPACT_UI.space_sm)
-            ),
-            content=ft.GestureDetector(
-                content=card,
-                on_tap=lambda _, track_id=track.id: self.page.run_task(
-                    self._select_library_track, track_id
-                ),
-                on_double_tap=lambda _, track_id=track.id: self._open_tag_editor(
-                    track_id
-                ),
-                mouse_cursor=ft.MouseCursor.CLICK,
-            ),
-        )
+        return self.track_row.track_row(track)
 
     def _track_title_row(self, track: TrackRecord) -> ft.Control:
-        artist = track.metadata.artist.strip() or "Unknown Artist"
-        title = track.metadata.title.strip() or track.path.stem
-        return ft.Row(
-            controls=[
-                ft.Text(
-                    f"{artist} - {title}",
-                    expand=True,
-                    expand_loose=True,
-                    weight=ft.FontWeight.BOLD,
-                    size=self._library_size(COMPACT_UI.font_sm, minimum=6.0),
-                    max_lines=1,
-                    overflow=ft.TextOverflow.ELLIPSIS,
-                ),
-                self._track_tag(self._track_key_label(track), accent=True),
-                self._track_tag(self._track_bpm_label(track), accent=True),
-            ],
-            spacing=self._library_size(COMPACT_UI.space_xs),
-            vertical_alignment=ft.CrossAxisAlignment.CENTER,
-        )
+        return self.track_row.track_title_row(track)
 
     def _track_details_row(self, track: TrackRecord) -> ft.Control:
-        album = track.metadata.album.strip() or "Альбом —"
-        controls: list[ft.Control] = [
-            ft.Text(
-                self._format_duration(track.technical.duration),
-                size=self._library_size(COMPACT_UI.font_xs, minimum=5.5),
-                color=ft.Colors.ON_SURFACE,
-            )
-        ]
-        controls.extend(
-            self._track_tag(label) for label in self._track_detail_tags(track)
-        )
-        controls.append(
-            ft.Text(
-                album,
-                expand=True,
-                size=self._library_size(COMPACT_UI.font_xs, minimum=5.5),
-                color=ft.Colors.ON_SURFACE_VARIANT,
-                max_lines=1,
-                overflow=ft.TextOverflow.ELLIPSIS,
-            )
-        )
-        return ft.Row(
-            controls=controls,
-            spacing=self._library_size(COMPACT_UI.space_xs),
-            vertical_alignment=ft.CrossAxisAlignment.CENTER,
-        )
+        return self.track_row.track_details_row(track)
 
     def _track_path_link(self, track: TrackRecord) -> ft.Control:
-        return ft.GestureDetector(
-            content=ft.Row(
-                controls=[
-                    ft.Icon(
-                        ft.Icons.FOLDER_OPEN_OUTLINED,
-                        size=self._library_size(COMPACT_UI.font_xs, minimum=5.5),
-                        color=ft.Colors.PRIMARY,
-                    ),
-                    ft.Text(
-                        str(track.path),
-                        expand=True,
-                        size=self._library_size(COMPACT_UI.font_micro, minimum=5.0),
-                        color=ft.Colors.PRIMARY,
-                        max_lines=1,
-                        overflow=ft.TextOverflow.ELLIPSIS,
-                    ),
-                ],
-                spacing=self._library_size(COMPACT_UI.space_xs),
-                vertical_alignment=ft.CrossAxisAlignment.CENTER,
-            ),
-            on_double_tap=lambda _, current=track: self._reveal_track_file(current),
-            mouse_cursor=ft.MouseCursor.CLICK,
-        )
+        return self.track_row.track_path_link(track)
 
     def _track_tag(self, label: str, *, accent: bool = False) -> ft.Control:
-        return ft.Container(
-            height=self._library_size(12, minimum=8.0),
-            padding=ft.Padding.symmetric(horizontal=self._library_size(4)),
-            border_radius=self._library_size(4),
-            bgcolor=(
-                ft.Colors.PRIMARY_CONTAINER
-                if accent
-                else ft.Colors.SURFACE_CONTAINER_HIGHEST
-            ),
-            alignment=ft.Alignment.CENTER,
-            animate=ft.Animation(
-                duration=120,
-                curve=ft.AnimationCurve.EASE_OUT_CUBIC,
-            ),
-            on_hover=(
-                DJMakerUI._on_accent_track_tag_hover
-                if accent
-                else DJMakerUI._on_neutral_track_tag_hover
-            ),
-            content=ft.Text(
-                label,
-                size=self._library_size(COMPACT_UI.font_micro, minimum=5.0),
-                color=(
-                    ft.Colors.ON_PRIMARY_CONTAINER
-                    if accent
-                    else ft.Colors.ON_SURFACE_VARIANT
-                ),
-                max_lines=1,
-            ),
-        )
+        return self.track_row.track_tag(label, accent=accent)
 
     @staticmethod
     def _on_accent_track_tag_hover(event: ft.Event[ft.Container]) -> None:
@@ -1298,158 +1067,25 @@ class DJMakerUI(BeatGridEditorUI, PlaylistUI):
 
     @staticmethod
     def _track_bpm_label(track: TrackRecord) -> str:
-        bpm = track.analysis.bpm if track.analysis is not None else None
-        if bpm is None:
-            bpm = track.metadata.bpm
-        return f"{bpm:.1f} BPM" if bpm is not None else "BPM —"
+        return TrackRowController.track_bpm_label(track)
 
     @staticmethod
     def _track_key_label(track: TrackRecord) -> str:
-        analysis = track.analysis
-        if analysis is not None:
-            key = " ".join(
-                part for part in (analysis.musical_key, analysis.scale) if part
-            )
-            parts = [part for part in (key, analysis.camelot) if part]
-            if parts:
-                return " · ".join(parts)
-        return track.metadata.musical_key.strip() or "Key —"
+        return TrackRowController.track_key_label(track)
 
     @staticmethod
     def _track_detail_tags(track: TrackRecord) -> tuple[str, ...]:
-        tags: list[str] = []
-        year = track.metadata.year.strip()
-        if year:
-            tags.append(year)
-
-        tags.append((track.extension.lstrip(".") or "audio").upper())
-
-        technical = track.technical
-        if technical.bitrate:
-            tags.append(f"{round(technical.bitrate / 1000)} kbps")
-        if technical.sample_rate:
-            tags.append(f"{technical.sample_rate / 1000:g} kHz")
-        if technical.channels:
-            channel_label = (
-                "Mono"
-                if technical.channels == 1
-                else "Stereo"
-                if technical.channels == 2
-                else f"{technical.channels} ch"
-            )
-            tags.append(channel_label)
-        return tuple(tags)
+        return TrackRowController.track_detail_tags(track)
 
     def _reveal_track_file(self, track: TrackRecord) -> None:
-        try:
-            reveal_file(track.path)
-        except OSError as exc:
-            LOGGER.warning(
-                "Не удалось открыть расположение файла %s: %s",
-                track.path,
-                exc,
-            )
-            self._notify("Не удалось открыть папку с файлом")
+        self.track_row.reveal_track_file(track)
 
     def _track_artwork(self, track: TrackRecord) -> ft.Control:
         """Показывает кликабельную обложку с embedded/online fallback."""
-        fallback = ft.Container(
-            width=self._library_size(COMPACT_UI.track_icon_box),
-            height=self._library_size(COMPACT_UI.track_icon_box),
-            border_radius=self._library_size(6),
-            bgcolor=ft.Colors.PRIMARY_CONTAINER,
-            alignment=ft.Alignment.CENTER,
-            content=ft.Icon(
-                ft.Icons.MUSIC_NOTE,
-                size=self._library_size(COMPACT_UI.track_icon_size),
-                color=ft.Colors.ON_PRIMARY_CONTAINER,
-            ),
-        )
-
-        def image(source: str, error_content: ft.Control) -> ft.Image:
-            return ft.Image(
-                src=source,
-                width=self._library_size(COMPACT_UI.track_icon_box),
-                height=self._library_size(COMPACT_UI.track_icon_box),
-                fit=ft.BoxFit.COVER,
-                border_radius=self._library_size(6),
-                error_content=error_content,
-                cache_width=128,
-                cache_height=128,
-                semantics_label="Обложка альбома",
-            )
-
-        artwork_url = (track.artwork_url or "").strip()
-        remote = image(artwork_url, fallback) if artwork_url else fallback
-        embedded = track.embedded_artwork_path
-        artwork: ft.Control = (
-            image(str(embedded), remote)
-            if embedded is not None and embedded.is_file()
-            else remote
-        )
-        return ft.GestureDetector(
-            content=artwork,
-            on_tap=lambda _, track_id=track.id: self.page.run_task(
-                self._play_track, track_id, 0
-            ),
-            mouse_cursor=ft.MouseCursor.CLICK,
-        )
+        return self.track_row.track_artwork(track)
 
     def _track_waveform(self, track: TrackRecord) -> ft.Control:
-        peaks = track.waveform.peaks if track.waveform is not None else ()
-        normalized_peaks = resample_waveform_peaks(
-            peaks,
-            COMPACT_UI.waveform_bar_count,
-        )
-
-        played = 0
-        if self._player_track_id == track.id:
-            duration = self._player_duration_ms
-            fraction = (self._player_position_ms / duration) if duration > 0 else 0.0
-            played = min(
-                len(normalized_peaks),
-                max(0, round(len(normalized_peaks) * fraction)),
-            )
-
-        base_image = ft.Image(
-            src=self._waveform_svg(normalized_peaks),
-            width=self._waveform_width(),
-            height=self._library_size(COMPACT_UI.waveform_height),
-            fit=ft.BoxFit.FILL,
-            color=ft.Colors.SURFACE_CONTAINER_HIGHEST,
-            exclude_from_semantics=True,
-        )
-        progress_image = ft.Image(
-            src=self._waveform_svg(normalized_peaks, played),
-            width=self._waveform_width(),
-            height=self._library_size(COMPACT_UI.waveform_height),
-            fit=ft.BoxFit.FILL,
-            color=ft.Colors.PRIMARY,
-            exclude_from_semantics=True,
-        )
-        self._waveform_views[track.id] = _WaveformView(
-            peaks=normalized_peaks,
-            progress_image=progress_image,
-            played_bars=played,
-        )
-
-        waveform = ft.Container(
-            width=self._waveform_width(),
-            height=self._library_size(COMPACT_UI.track_icon_box),
-            alignment=ft.Alignment.CENTER,
-            content=ft.Stack(
-                controls=[base_image, progress_image],
-                width=self._waveform_width(),
-                height=self._library_size(COMPACT_UI.waveform_height),
-            ),
-        )
-        return ft.GestureDetector(
-            content=waveform,
-            on_tap=lambda event, current=track: self._play_from_waveform(
-                event, current
-            ),
-            mouse_cursor=ft.MouseCursor.CLICK,
-        )
+        return self.track_row.track_waveform(track)
 
     def show_folders(self) -> None:
         """Отображает корневые папки и действия сканирования."""
@@ -1502,17 +1138,7 @@ class DJMakerUI(BeatGridEditorUI, PlaylistUI):
 
     @staticmethod
     def _analysis_label(track: TrackRecord) -> str:
-        analysis = track.analysis
-        if analysis is None:
-            return "BPM / Key: —"
-        bpm = f"{analysis.bpm:.1f} BPM" if analysis.bpm is not None else "— BPM"
-        key = " ".join(part for part in (analysis.musical_key, analysis.scale) if part)
-        parts = [bpm, key or "—"]
-        if analysis.camelot:
-            parts.append(analysis.camelot)
-        if analysis.beat_grid is not None:
-            parts.append(f"сетка {len(analysis.beat_grid.beat_ticks_ms)} долей")
-        return " · ".join(parts)
+        return TrackRowController.analysis_label(track)
 
     async def ensure_embedded_artwork(self) -> None:
         """Индексирует встроенные обложки как управляемую фоновую задачу."""
@@ -2539,7 +2165,7 @@ class DJMakerUI(BeatGridEditorUI, PlaylistUI):
         self.page.show_dialog(dialog)
 
     def _start_metadata_search(self, track_id: int) -> None:
-        self.page.run_task(self._metadata_search, track_id)
+        self.track_row.start_metadata_search(track_id)
 
     async def _metadata_search(self, track_id: int) -> None:
         self._set_busy(True, "Поиск в MusicBrainz...")

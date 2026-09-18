@@ -14,6 +14,7 @@ TRACK_SELECTION_SOURCE = (
 TASK_PROGRESS_SOURCE = (
     PROJECT_ROOT / "src" / "djmaker" / "ui" / "task_progress_controls.py"
 )
+TRACK_ROW_SOURCE = PROJECT_ROOT / "src" / "djmaker" / "ui" / "track_row_controls.py"
 PYPROJECT = PROJECT_ROOT / "pyproject.toml"
 
 
@@ -32,20 +33,24 @@ class WaveformUITests(unittest.TestCase):
             "position=ft.Duration(milliseconds=target_position_ms)",
             track_selection_source,
         )
-        self.assertIn("event.local_position.x / self._waveform_width()", ui)
+        self.assertIn(
+            "event.local_position.x / self.waveform_width()",
+            TRACK_ROW_SOURCE.read_text(encoding="utf-8"),
+        )
 
     def test_track_row_has_clickable_cover_and_vertical_waveform_bars(self) -> None:
         source = UI_SOURCE.read_text(encoding="utf-8")
+        track_row_source = TRACK_ROW_SOURCE.read_text(encoding="utf-8")
 
         self.assertIn("def _track_waveform", source)
-        self.assertIn("on_tap=lambda _, track_id=track.id", source)
-        self.assertIn("on_tap=lambda event, current=track", source)
-        self.assertNotIn("on_tap_down=lambda event, current=track", source)
+        self.assertIn("on_tap=lambda _, track_id=track.id", track_row_source)
+        self.assertIn("on_tap=lambda event, current=track", track_row_source)
+        self.assertNotIn("on_tap_down=lambda event, current=track", track_row_source)
         self.assertIn("def _waveform_svg", source)
-        self.assertIn("ft.Stack(", source)
-        self.assertIn("waveform_bar_gap", source)
-        self.assertIn("ft.Colors.PRIMARY", source)
-        self.assertNotIn("_waveform_bar_controls", source)
+        self.assertIn("ft.Stack(", track_row_source)
+        self.assertIn("waveform_bar_gap", track_row_source)
+        self.assertIn("ft.Colors.PRIMARY", track_row_source)
+        self.assertNotIn("_waveform_bar_controls", track_row_source)
 
     def test_waveform_is_wider_and_player_updates_are_partial(self) -> None:
         source = UI_SOURCE.read_text(encoding="utf-8")
@@ -78,15 +83,18 @@ class WaveformUITests(unittest.TestCase):
 
     def test_track_metadata_is_rendered_in_three_requested_lines(self) -> None:
         source = UI_SOURCE.read_text(encoding="utf-8")
+        track_row_source = TRACK_ROW_SOURCE.read_text(encoding="utf-8")
 
         self.assertIn("def _track_title_row", source)
-        self.assertIn("self._track_key_label(track)", source)
-        self.assertIn("self._track_bpm_label(track)", source)
+        self.assertIn("self.track_key_label(track)", track_row_source)
+        self.assertIn("self.track_bpm_label(track)", track_row_source)
         self.assertIn("def _track_details_row", source)
-        self.assertIn("self._track_detail_tags(track)", source)
+        self.assertIn("self.track_detail_tags(track)", track_row_source)
         self.assertIn("def _track_path_link", source)
-        self.assertIn("on_double_tap=", source)
-        self.assertIn("height=self._library_size(COMPACT_UI.track_icon_box)", source)
+        self.assertIn("on_double_tap=", track_row_source)
+        self.assertIn(
+            "height=self.library_size(COMPACT_UI.track_icon_box)", track_row_source
+        )
 
     def test_waveform_background_task_starts_with_application(self) -> None:
         source = APP_SOURCE.read_text(encoding="utf-8")

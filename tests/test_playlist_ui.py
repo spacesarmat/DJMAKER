@@ -19,6 +19,7 @@ from djmaker.settings import AppSettings
 from djmaker.ui.app import DJMakerUI
 from djmaker.ui.navigation_cards_controls import NavigationCardsController
 from djmaker.ui.task_progress_controls import TaskProgressController
+from djmaker.ui.track_row_controls import TrackRowController
 
 
 class PlaylistUIFlowTests(unittest.IsolatedAsyncioTestCase):
@@ -80,6 +81,7 @@ class PlaylistUIFlowTests(unittest.IsolatedAsyncioTestCase):
         ui.tasks = TaskManager()
         ui.task_progress = TaskProgressController(ui)
         ui.navigation_cards = NavigationCardsController(ui)
+        ui.track_row = TrackRowController(ui)
         ui._notify = Mock()
         ui.show_library = Mock()
         ui._refresh_task_indicator = Mock()
