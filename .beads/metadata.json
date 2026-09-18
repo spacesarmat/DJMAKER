@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "DJMAKER_V_2",
+  "project_id": "0582fdd9-01bc-4575-a06b-7841c87052b0"
+}
