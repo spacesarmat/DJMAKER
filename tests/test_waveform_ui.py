@@ -7,6 +7,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 UI_SOURCE = PROJECT_ROOT / "src" / "djmaker" / "ui" / "app.py"
 APP_SOURCE = PROJECT_ROOT / "src" / "djmaker" / "app.py"
+PLAYER_SOURCE = PROJECT_ROOT / "src" / "djmaker" / "ui" / "player_controls.py"
 PYPROJECT = PROJECT_ROOT / "pyproject.toml"
 
 
@@ -38,24 +39,27 @@ class WaveformUITests(unittest.TestCase):
 
     def test_waveform_is_wider_and_player_updates_are_partial(self) -> None:
         source = UI_SOURCE.read_text(encoding="utf-8")
+        player_source = PLAYER_SOURCE.read_text(encoding="utf-8")
         density = (PROJECT_ROOT / "src" / "djmaker" / "ui" / "density.py").read_text(
             encoding="utf-8"
         )
 
         self.assertIn("waveform_bar_width: int = 5", density)
-        self.assertIn("self.page.update(*controls)", source)
+        self.assertIn("app.page.update(*controls)", player_source)
         self.assertIn("dict[int, _WaveformView]", source)
-        self.assertIn("played == view.played_bars", source)
+        self.assertIn("played == view.played_bars", player_source)
         self.assertIn("concurrency = min(1,", source)
 
 
     def test_track_switch_waits_for_loaded_source_and_ignores_stale_events(self) -> None:
         source = UI_SOURCE.read_text(encoding="utf-8")
+        player_source = PLAYER_SOURCE.read_text(encoding="utf-8")
 
         self.assertIn("self._player_switch_lock = asyncio.Lock()", source)
         self.assertIn("self._player_load_event.wait()", source)
+        self.assertIn("app._player_load_event.wait()", player_source)
         self.assertIn("def _commit_player_track", source)
-        self.assertIn("if self._player_switching:\n            return", source)
+        self.assertIn("if app._player_switching:\n            return", player_source)
         self.assertIn("self._player_request_revision += 1", source)
         self.assertNotIn("_player_pending_position_ms", source)
 

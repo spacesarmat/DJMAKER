@@ -57,6 +57,7 @@ from djmaker.settings import (
 )
 from djmaker.ui.density import COMPACT_UI, scaled_library_size
 from djmaker.ui.beat_grid_editor import BeatGridEditorUI
+from djmaker.ui.player_controls import PlayerControlsController
 from djmaker.ui.playlists import PlaylistUI
 from djmaker.ui.scrolling import centered_scroll_offset
 from djmaker.ui.theme import (
@@ -265,6 +266,7 @@ class DJMakerUI(BeatGridEditorUI, PlaylistUI):
             on_click=self._stop_player,
         )
         self.player_bar = self._build_player_bar()
+        self.player = PlayerControlsController(self)
         self.content = ft.Column(expand=True, spacing=COMPACT_UI.space_md)
         self.theme_button = ft.IconButton(
             icon=theme_mode_icon(self.settings.theme_mode),
@@ -476,76 +478,7 @@ class DJMakerUI(BeatGridEditorUI, PlaylistUI):
 
     async def _play_external_audio(self, source: Path, title: str) -> None:
         """Воспроизводит локальный preview без добавления его в медиатеку."""
-        self._player_request_revision += 1
-        request_revision = self._player_request_revision
-        started_switch = False
-        try:
-            if not source.is_file():
-                raise RuntimeError(f"Файл не найден: {source}")
-            async with self._player_switch_lock:
-                started_switch = True
-                self._player_switching = True
-                if self.audio is not None:
-                    try:
-                        await self.audio.pause()
-                    except Exception:
-                        LOGGER.debug("Не удалось остановить предыдущий source", exc_info=True)
-                if request_revision != self._player_request_revision:
-                    return
-                self._player_load_event = asyncio.Event()
-                audio, source_changed, audio_created = self._ensure_audio_path(source)
-                if audio_created:
-                    self.page.update()
-                elif source_changed:
-                    audio.update()
-                else:
-                    self._player_load_event.set()
-                await asyncio.wait_for(
-                    self._player_load_event.wait(),
-                    timeout=_PLAYER_SOURCE_LOAD_TIMEOUT_SECONDS,
-                )
-                if request_revision != self._player_request_revision:
-                    return
-                duration = await asyncio.wait_for(
-                    audio.get_duration(),
-                    timeout=_PLAYER_SOURCE_LOAD_TIMEOUT_SECONDS,
-                )
-                previous_track_id = self._player_track_id
-                self._player_track_id = None
-                self._player_position_ms = 0
-                self._player_duration_ms = (
-                    max(0, duration.in_milliseconds) if duration is not None else 0
-                )
-                self._player_state = fta.AudioState.STOPPED
-                self.player_title.value = title
-                self.player_bar.visible = True
-                self._refresh_player_controls()
-                controls: list[ft.Control] = [
-                    self.player_bar,
-                    self.player_title,
-                    self.player_play_button,
-                    self.player_position,
-                    self.player_progress,
-                ]
-                if previous_track_id is not None:
-                    waveform = self._paint_waveform_progress(previous_track_id, 0.0)
-                    if waveform is not None:
-                        controls.append(waveform)
-                self._player_switching = False
-                self._player_load_event = None
-                started_switch = False
-                self.page.update(*controls)
-                await audio.play()
-        except TimeoutError:
-            LOGGER.error("Preview source не загрузился вовремя: %s", source)
-            self._notify("Плеер не успел загрузить preview перехода")
-        except Exception as exc:
-            LOGGER.exception("Не удалось воспроизвести preview %s", source)
-            self._notify(f"Не удалось воспроизвести переход: {exc}")
-        finally:
-            if started_switch:
-                self._player_switching = False
-                self._player_load_event = None
+        await self.player.play_external_audio(source, title)
 
     async def _on_player_loaded(self, _: object) -> None:
         """Подтверждает готовность нового native audio source."""
@@ -559,28 +492,7 @@ class DJMakerUI(BeatGridEditorUI, PlaylistUI):
         position_ms: int,
     ) -> list[ft.Control]:
         """Атомарно переключает UI плеера на уже загруженный трек."""
-        previous_track_id = self._player_track_id
-        waveform_updates: list[ft.Control] = []
-        if previous_track_id is not None and previous_track_id != track.id:
-            previous_waveform = self._paint_waveform_progress(previous_track_id, 0.0)
-            if previous_waveform is not None:
-                waveform_updates.append(previous_waveform)
-
-        self._player_track_id = track.id
-        self._player_position_ms = max(0, position_ms)
-        self._player_duration_ms = max(
-            0, int((track.technical.duration or 0.0) * 1000)
-        )
-        self._player_state = fta.AudioState.STOPPED
-        artist = track.metadata.artist or "Unknown Artist"
-        title = track.metadata.title or track.path.stem
-        self.player_title.value = f"{artist} - {title}"
-        self.player_bar.visible = True
-        self._refresh_player_controls()
-        current_waveform = self._refresh_waveform_progress()
-        if current_waveform is not None:
-            waveform_updates.append(current_waveform)
-        return waveform_updates
+        return self.player.commit_player_track(track, position_ms)
 
     async def _play_track(self, track_id: int, position_ms: int = 0) -> None:
         """Выбирает трек и плавно запускает его с нужной позиции."""
@@ -682,83 +594,19 @@ class DJMakerUI(BeatGridEditorUI, PlaylistUI):
             self._notify(f"Ошибка плеера: {exc}")
 
     async def _stop_player(self, _: object) -> None:
-        if self.audio is None:
-            return
-        try:
-            await self.audio.pause()
-            await self.audio.seek(ft.Duration(milliseconds=0))
-            self._player_position_ms = 0
-            self._player_state = fta.AudioState.STOPPED
-            self._refresh_player_controls()
-            controls: list[ft.Control] = [
-                self.player_play_button,
-                self.player_position,
-                self.player_progress,
-            ]
-            waveform = self._refresh_waveform_progress()
-            if waveform is not None:
-                controls.append(waveform)
-            self.page.update(*controls)
-        except Exception as exc:
-            LOGGER.exception("Ошибка остановки плеера")
-            self._notify(f"Ошибка плеера: {exc}")
+        await self.player.stop_player(_)
 
     def _on_player_duration_change(self, event: fta.AudioDurationChangeEvent) -> None:
-        if self._player_switching:
-            return
-        self._player_duration_ms = max(0, event.duration.in_milliseconds)
-        self._refresh_player_controls()
-        controls: list[ft.Control] = [self.player_position, self.player_progress]
-        waveform = self._refresh_waveform_progress()
-        if waveform is not None:
-            controls.append(waveform)
-        self.page.update(*controls)
+        self.player.on_player_duration_change(event)
 
     def _on_player_position_change(self, event: fta.AudioPositionChangeEvent) -> None:
-        if self._player_switching:
-            return
-        self._player_position_ms = max(0, int(event.position))
-        self._refresh_player_controls()
-        controls: list[ft.Control] = [self.player_position, self.player_progress]
-        waveform = self._refresh_waveform_progress()
-        if waveform is not None:
-            controls.append(waveform)
-        self.page.update(*controls)
+        self.player.on_player_position_change(event)
 
     def _on_player_state_change(self, event: fta.AudioStateChangeEvent) -> None:
-        if self._player_switching:
-            return
-        self._player_state = event.state
-        if event.state is fta.AudioState.COMPLETED:
-            self._player_position_ms = self._player_duration_ms
-        self._refresh_player_controls()
-        controls: list[ft.Control] = [
-            self.player_play_button,
-            self.player_position,
-            self.player_progress,
-        ]
-        waveform = self._refresh_waveform_progress()
-        if waveform is not None:
-            controls.append(waveform)
-        self.page.update(*controls)
+        self.player.on_player_state_change(event)
 
     def _refresh_player_controls(self) -> None:
-        duration = self._player_duration_ms
-        position = (
-            min(self._player_position_ms, duration)
-            if duration
-            else self._player_position_ms
-        )
-        self.player_play_button.icon = (
-            ft.Icons.PAUSE
-            if self._player_state is fta.AudioState.PLAYING
-            else ft.Icons.PLAY_ARROW
-        )
-        self.player_position.value = (
-            f"{self._format_duration(position / 1000)} / "
-            f"{self._format_duration(duration / 1000)}"
-        )
-        self.player_progress.value = (position / duration) if duration > 0 else 0.0
+        self.player.refresh_player_controls()
 
     @staticmethod
     def _base_waveform_width() -> int:
@@ -813,30 +661,14 @@ class DJMakerUI(BeatGridEditorUI, PlaylistUI):
         self.page.run_task(self._play_track, track.id, position_ms)
 
     def _refresh_waveform_progress(self) -> ft.Control | None:
-        track_id = self._player_track_id
-        if track_id is None:
-            return None
-        duration = self._player_duration_ms
-        fraction = (self._player_position_ms / duration) if duration > 0 else 0.0
-        return self._paint_waveform_progress(track_id, fraction)
+        return self.player.refresh_waveform_progress()
 
     def _paint_waveform_progress(
         self,
         track_id: int,
         fraction: float,
     ) -> ft.Control | None:
-        view = self._waveform_views.get(track_id)
-        if view is None:
-            return None
-        played = min(
-            len(view.peaks),
-            max(0, round(len(view.peaks) * min(1.0, max(0.0, fraction)))),
-        )
-        if played == view.played_bars:
-            return None
-        view.played_bars = played
-        view.progress_image.src = self._waveform_svg(view.peaks, played)
-        return view.progress_image
+        return self.player.paint_waveform_progress(track_id, fraction)
 
     def _build_navigation(self) -> ft.NavigationRail:
         """Создаёт постоянную боковую навигацию приложения."""
@@ -4164,12 +3996,7 @@ class DJMakerUI(BeatGridEditorUI, PlaylistUI):
 
     @staticmethod
     def _format_duration(seconds: float | None) -> str:
-        if seconds is None:
-            return "--:--"
-        total = max(0, int(seconds))
-        minutes, secs = divmod(total, 60)
-        hours, minutes = divmod(minutes, 60)
-        return f"{hours}:{minutes:02d}:{secs:02d}" if hours else f"{minutes}:{secs:02d}"
+        return PlayerControlsController.format_duration(seconds)
 
     @staticmethod
     def _format_size(size: int) -> str:
