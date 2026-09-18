@@ -8,6 +8,7 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 UI_SOURCE = PROJECT_ROOT / "src" / "djmaker" / "ui" / "app.py"
+DROP_SOURCE = PROJECT_ROOT / "src" / "djmaker" / "ui" / "drop_import_controls.py"
 PYPROJECT = PROJECT_ROOT / "pyproject.toml"
 TASK_SOURCE = PROJECT_ROOT / "src" / "djmaker" / "services" / "tasks.py"
 
@@ -27,14 +28,15 @@ class DragDropUITests(unittest.TestCase):
 
     def test_drop_import_uses_managed_task_pipeline(self) -> None:
         source = UI_SOURCE.read_text(encoding="utf-8")
+        drop_source = DROP_SOURCE.read_text(encoding="utf-8")
         tasks = TASK_SOURCE.read_text(encoding="utf-8")
 
         self.assertIn('LIBRARY_IMPORT = "library_import"', tasks)
         self.assertIn("async def _run_drop_import", source)
-        self.assertIn("self.service.import_paths", source)
-        self.assertIn("TaskKind.LIBRARY_IMPORT", source)
-        self.assertIn("stats.ignored", source)
-        self.assertIn("self.page.run_task(self.ensure_waveforms)", source)
+        self.assertIn("app.service.import_paths", drop_source)
+        self.assertIn("TaskKind.LIBRARY_IMPORT", drop_source)
+        self.assertIn("stats.ignored", drop_source)
+        self.assertIn("app.page.run_task(app.ensure_waveforms)", drop_source)
 
     def test_drop_overlay_explains_filtering(self) -> None:
         source = UI_SOURCE.read_text(encoding="utf-8")

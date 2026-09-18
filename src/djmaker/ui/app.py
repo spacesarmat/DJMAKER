@@ -57,6 +57,7 @@ from djmaker.settings import (
 )
 from djmaker.ui.density import COMPACT_UI, scaled_library_size
 from djmaker.ui.beat_grid_editor import BeatGridEditorUI
+from djmaker.ui.drop_import_controls import DropImportController
 from djmaker.ui.player_controls import PlayerControlsController
 from djmaker.ui.playlists import PlaylistUI
 from djmaker.ui.scrolling import centered_scroll_offset
@@ -278,6 +279,7 @@ class DJMakerUI(BeatGridEditorUI, PlaylistUI):
         )
         self.navigation = self._build_navigation()
         self._drop_overlay = self._build_drop_overlay()
+        self.drop_import = DropImportController(self)
 
     def build(self) -> None:
         """Строит главное окно приложения."""
@@ -397,19 +399,7 @@ class DJMakerUI(BeatGridEditorUI, PlaylistUI):
 
     def _on_paths_dropped(self, event: object) -> None:
         """Передаёт реальные desktop paths в управляемую задачу импорта."""
-        self._drop_overlay.visible = False
-        self._drop_overlay.update()
-
-        files = getattr(event, "files", ()) or ()
-        paths = tuple(
-            Path(path)
-            for item in files
-            if (path := str(getattr(item, "path", "") or "").strip())
-        )
-        if not paths:
-            self._notify("Drag&Drop: не получено локальных файлов или папок")
-            return
-        self.page.run_task(self._run_drop_import, paths)
+        self.drop_import.on_paths_dropped(event)
 
     def _build_player_bar(self) -> ft.Container:
         """Создаёт компактный постоянный плеер прослушивания."""
@@ -2021,94 +2011,13 @@ class DJMakerUI(BeatGridEditorUI, PlaylistUI):
         )
 
     async def _pick_and_scan(self, _: object) -> None:
-        try:
-            selected = await ft.FilePicker().get_directory_path(
-                dialog_title="Выберите папку с музыкой"
-            )
-        except Exception as exc:
-            LOGGER.exception("Ошибка FilePicker")
-            self._notify(f"Не удалось открыть выбор папки: {exc}")
-            return
-        if not selected:
-            return
-        await self._run_scan(Path(selected))
+        await self.drop_import.pick_and_scan(_)
 
     def _scan_existing(self, path: Path) -> None:
         self.page.run_task(self._run_scan, path)
 
     async def _run_scan(self, path: Path, task_id: str | None = None) -> None:
-        root = path.expanduser().resolve()
-        task: ManagedTask
-        if task_id is None:
-            task = self.tasks.create(
-                kind=TaskKind.LIBRARY_SCAN,
-                title=f"Сканирование: {root.name or root}",
-                detail=str(root),
-            )
-            task_id = task.id
-            self._scan_task_paths[task_id] = root
-        else:
-            task = self.tasks.get(task_id)  # type: ignore[assignment]
-            if task is None:
-                return
-
-        self._refresh_task_indicator()
-        self.status.value = f"Сканирование: {root}"
-        self.page.update()
-
-        def update_progress(stats: object, current_path: Path) -> None:
-            discovered = int(getattr(stats, "discovered", 0))
-            updated = int(getattr(stats, "updated", 0))
-            unchanged = int(getattr(stats, "unchanged", 0))
-            errors = int(getattr(stats, "errors", 0))
-            task.set_progress(
-                completed=updated + unchanged + errors,
-                succeeded=updated + unchanged,
-                failed=errors,
-                detail=f"{current_path.name} · найдено: {discovered}",
-            )
-
-        try:
-            stats = await self.workers.run(
-                self.service.scan_folder,
-                root,
-                task=task,
-                progress=update_progress,
-            )
-        except TaskPaused:
-            task.mark_paused("Остановлено · можно продолжить")
-            self._notify(f"Сканирование остановлено: {root}")
-        except TaskCancelled:
-            task.mark_cancelled()
-            self._forget_task_context(task_id)
-            self._notify(f"Сканирование отменено: {root}")
-        except Exception as exc:
-            LOGGER.exception("Ошибка сканирования")
-            task.mark_failed(exc)
-            self._forget_task_context(task_id)
-            self._notify(f"Ошибка сканирования: {exc}")
-        else:
-            task.set_progress(
-                completed=stats.updated + stats.unchanged + stats.errors,
-                succeeded=stats.updated + stats.unchanged,
-                failed=stats.errors,
-                detail=f"Завершено · найдено: {stats.discovered}",
-            )
-            task.mark_completed()
-            self._forget_task_context(task_id)
-            self._notify(
-                "Сканирование завершено: "
-                f"найдено {stats.discovered}, обновлено {stats.updated}, "
-                f"без изменений {stats.unchanged}, удалено {stats.removed}, "
-                f"пропущено {stats.ignored}, ошибок {stats.errors}"
-            )
-            if self.navigation.selected_index == 1:
-                self.show_folders()
-            if self.tasks.active_for_kind(TaskKind.WAVEFORM_ANALYSIS) is None:
-                self.page.run_task(self.ensure_waveforms)
-        finally:
-            self._refresh_task_indicator()
-            self.page.update()
+        await self.drop_import.run_scan(path, task_id)
 
     async def _run_drop_import(
         self,
@@ -2116,112 +2025,7 @@ class DJMakerUI(BeatGridEditorUI, PlaylistUI):
         task_id: str | None = None,
     ) -> None:
         """Импортирует dropped-файлы/папки через общий scanner/task pipeline."""
-        task: ManagedTask
-        if task_id is None:
-            if (
-                self.tasks.active_for_kind(TaskKind.LIBRARY_SCAN) is not None
-                or self.tasks.active_for_kind(TaskKind.LIBRARY_IMPORT) is not None
-            ):
-                self._notify(
-                    "Drag&Drop: дождитесь завершения текущего сканирования "
-                    "или остановите его в «Задачах»"
-                )
-                return
-
-            plan = self.service.plan_import_paths(list(paths))
-            if plan.accepted_count == 0:
-                self._notify(
-                    "Drag&Drop: поддерживаемых аудиофайлов или папок не найдено "
-                    f"· пропущено: {plan.ignored_count}"
-                )
-                return
-
-            task = self.tasks.create(
-                kind=TaskKind.LIBRARY_IMPORT,
-                title="Drag&Drop импорт",
-                detail=(
-                    f"папок: {len(plan.directories)} · файлов: {len(plan.files)} "
-                    f"· сразу пропущено: {plan.ignored_count}"
-                ),
-            )
-            task_id = task.id
-            self._drop_task_paths[task_id] = tuple(paths)
-        else:
-            task = self.tasks.get(task_id)  # type: ignore[assignment]
-            if task is None:
-                return
-
-        self._refresh_task_indicator()
-        self.status.value = "Drag&Drop: импорт файлов и папок"
-        self.page.update()
-
-        def update_progress(stats: object, current_path: Path) -> None:
-            discovered = int(getattr(stats, "discovered", 0))
-            updated = int(getattr(stats, "updated", 0))
-            unchanged = int(getattr(stats, "unchanged", 0))
-            errors = int(getattr(stats, "errors", 0))
-            ignored = int(getattr(stats, "ignored", 0))
-            task.set_progress(
-                completed=updated + unchanged + errors + ignored,
-                succeeded=updated + unchanged,
-                failed=errors,
-                detail=(
-                    f"{current_path.name} · аудио: {discovered} "
-                    f"· пропущено: {ignored}"
-                ),
-            )
-
-        try:
-            stats = await self.workers.run(
-                self.service.import_paths,
-                list(paths),
-                task=task,
-                progress=update_progress,
-            )
-        except TaskPaused:
-            task.mark_paused("Остановлено · можно продолжить")
-            self._notify("Drag&Drop импорт остановлен")
-        except TaskCancelled:
-            task.mark_cancelled()
-            self._forget_task_context(task_id)
-            self._notify("Drag&Drop импорт отменён")
-        except Exception as exc:
-            LOGGER.exception("Ошибка Drag&Drop импорта")
-            task.mark_failed(exc)
-            self._forget_task_context(task_id)
-            self._notify(f"Ошибка Drag&Drop импорта: {exc}")
-        else:
-            task.set_progress(
-                completed=(
-                    stats.updated
-                    + stats.unchanged
-                    + stats.errors
-                    + stats.ignored
-                ),
-                succeeded=stats.updated + stats.unchanged,
-                failed=stats.errors,
-                detail=(
-                    f"Завершено · аудио: {stats.discovered} "
-                    f"· пропущено: {stats.ignored}"
-                ),
-            )
-            task.mark_completed()
-            self._forget_task_context(task_id)
-            self._notify(
-                "Drag&Drop завершён: "
-                f"аудио {stats.discovered}, обновлено {stats.updated}, "
-                f"без изменений {stats.unchanged}, пропущено {stats.ignored}, "
-                f"ошибок {stats.errors}"
-            )
-            if self.navigation.selected_index == 0:
-                self.show_library()
-            elif self.navigation.selected_index == 1:
-                self.show_folders()
-            if self.tasks.active_for_kind(TaskKind.WAVEFORM_ANALYSIS) is None:
-                self.page.run_task(self.ensure_waveforms)
-        finally:
-            self._refresh_task_indicator()
-            self.page.update()
+        await self.drop_import.run_drop_import(paths, task_id)
 
     def show_duplicates(self) -> None:
         """Показывает точные дубликаты по SHA-256."""
@@ -3428,13 +3232,7 @@ class DJMakerUI(BeatGridEditorUI, PlaylistUI):
 
     @staticmethod
     def _path_setting(label: str, path: Path) -> ft.Control:
-        return ft.Column(
-            controls=[
-                ft.Text(label, size=COMPACT_UI.font_micro),
-                ft.Text(str(path), selectable=True, size=COMPACT_UI.font_xs),
-            ],
-            spacing=0,
-        )
+        return DropImportController.path_setting(label, path)
 
     def _on_theme_mode_selected(self, event: object) -> None:
         control = getattr(event, "control", None)

@@ -78,11 +78,14 @@ class WaveformUITests(unittest.TestCase):
     def test_waveform_background_task_starts_with_application(self) -> None:
         source = APP_SOURCE.read_text(encoding="utf-8")
         ui = UI_SOURCE.read_text(encoding="utf-8")
+        drop_source = (
+            PROJECT_ROOT / "src" / "djmaker" / "ui" / "drop_import_controls.py"
+        ).read_text(encoding="utf-8")
 
         self.assertIn("page.run_task(ui.ensure_waveforms)", source)
         self.assertIn("TaskKind.WAVEFORM_ANALYSIS", ui)
         self.assertIn("self._run_waveform_analysis", ui)
-        self.assertIn("self.page.run_task(self.ensure_waveforms)", ui)
+        self.assertIn("app.page.run_task(app.ensure_waveforms)", drop_source)
 
 
 if __name__ == "__main__":
