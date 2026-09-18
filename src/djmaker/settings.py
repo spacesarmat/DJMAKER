@@ -31,6 +31,9 @@ DEFAULT_THEME_PALETTE = "djmaker_blue"
 
 KNOWN_METADATA_PROVIDERS = ("musicbrainz", "spotify")
 DEFAULT_METADATA_PROVIDERS: tuple[str, ...] = ("musicbrainz",)
+METADATA_AUTO_APPLY_THRESHOLD_MIN = 50
+METADATA_AUTO_APPLY_THRESHOLD_MAX = 100
+DEFAULT_METADATA_AUTO_APPLY_THRESHOLD = 90
 
 LIBRARY_SCALE_MIN = 70
 LIBRARY_SCALE_MAX = 150
@@ -89,6 +92,7 @@ class AppSettings:
     metadata_providers: tuple[str, ...] = DEFAULT_METADATA_PROVIDERS
     spotify_client_id: str = ""
     spotify_client_secret: str = ""
+    metadata_auto_apply_threshold: int = DEFAULT_METADATA_AUTO_APPLY_THRESHOLD
 
     @classmethod
     def from_mapping(cls, data: dict[str, Any]) -> "AppSettings":
@@ -139,6 +143,18 @@ class AppSettings:
         if not isinstance(spotify_client_secret, str):
             spotify_client_secret = ""
 
+        raw_threshold = data.get(
+            "metadata_auto_apply_threshold", DEFAULT_METADATA_AUTO_APPLY_THRESHOLD
+        )
+        try:
+            auto_apply_threshold = int(raw_threshold)
+        except (TypeError, ValueError):
+            auto_apply_threshold = DEFAULT_METADATA_AUTO_APPLY_THRESHOLD
+        auto_apply_threshold = min(
+            METADATA_AUTO_APPLY_THRESHOLD_MAX,
+            max(METADATA_AUTO_APPLY_THRESHOLD_MIN, auto_apply_threshold),
+        )
+
         return cls(
             theme_mode=mode,
             theme_palette=palette,
@@ -154,6 +170,7 @@ class AppSettings:
             metadata_providers=providers,
             spotify_client_id=spotify_client_id.strip(),
             spotify_client_secret=spotify_client_secret.strip(),
+            metadata_auto_apply_threshold=auto_apply_threshold,
         )
 
 

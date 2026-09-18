@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import re
+from difflib import SequenceMatcher
 
-from djmaker.domain.models import MetadataCandidate
+from djmaker.domain.models import MetadataCandidate, TrackRecord
 
 _MERGEABLE_FIELDS = ("title", "artist", "album", "year", "artwork_url", "genre", "release_id")
 _WHITESPACE_RE = re.compile(r"\s+")
@@ -12,6 +13,25 @@ _WHITESPACE_RE = re.compile(r"\s+")
 
 def _normalize(text: str) -> str:
     return _WHITESPACE_RE.sub(" ", text.strip().lower())
+
+
+def match_confidence(track: TrackRecord, candidate: MetadataCandidate) -> float:
+    """Оценивает уверенность совпадения кандидата с локальным треком (0..1).
+
+    Среднее similarity ratio (difflib) по title и artist. Если у локального
+    трека не заполнен artist — сравнивается только title, чтобы отсутствие
+    тега не занижало оценку искусственно.
+    """
+    local_title = _normalize(track.metadata.title or track.path.stem)
+    local_artist = _normalize(track.metadata.artist)
+    candidate_title = _normalize(candidate.title)
+    candidate_artist = _normalize(candidate.artist)
+
+    title_ratio = SequenceMatcher(None, local_title, candidate_title).ratio()
+    if not local_artist:
+        return title_ratio
+    artist_ratio = SequenceMatcher(None, local_artist, candidate_artist).ratio()
+    return (title_ratio + artist_ratio) / 2
 
 
 def merge_candidates(per_provider: list[list[MetadataCandidate]]) -> list[MetadataCandidate]:

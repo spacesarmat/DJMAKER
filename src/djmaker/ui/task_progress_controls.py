@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 import flet as ft
 
 from djmaker.domain.models import TrackRecord
+from djmaker.plugins.merge import match_confidence
 from djmaker.services.audio_analysis import recommended_analysis_concurrency
 from djmaker.services.tasks import TaskCancelled, TaskKind, TaskPaused, TaskSnapshot, TaskStatus
 from djmaker.ui.density import COMPACT_UI
@@ -290,6 +291,11 @@ class TaskProgressController:
             and task_id in app._playlist_export_contexts
         ):
             app.page.run_task(app._run_playlist_export, task_id)
+        elif (
+            snapshot.kind is TaskKind.METADATA_BULK_SEARCH
+            and task_id in app._metadata_bulk_task_contexts
+        ):
+            app.page.run_task(self.run_metadata_bulk_search, task_id)
         else:
             task.mark_failed("Контекст задачи больше недоступен")
 
@@ -304,6 +310,7 @@ class TaskProgressController:
         app._drop_task_paths.pop(task_id, None)
         app._artwork_task_contexts.pop(task_id, None)
         app._waveform_task_contexts.pop(task_id, None)
+        app._metadata_bulk_task_contexts.pop(task_id, None)
 
     async def run_audio_analysis(self, task_id: str) -> None:
         app = self.app
@@ -594,6 +601,152 @@ class TaskProgressController:
                 app.show_audio_modules()
             else:
                 app.page.update()
+
+    def start_metadata_bulk_search(self, tracks: list[TrackRecord]) -> None:
+        """Запускает фоновый массовый поиск метаданных по переданным трекам."""
+        app = self.app
+        existing = app.tasks.active_for_kind(TaskKind.METADATA_BULK_SEARCH)
+        if existing is not None:
+            app._notify(
+                "Массовый поиск метаданных уже выполняется или остановлен. "
+                "Откройте «Задачи» для управления."
+            )
+            return
+        if not tracks:
+            app._notify("Нет треков для обработки")
+            return
+        if not app.settings.metadata_providers:
+            app._notify(
+                "Не выбрано ни одного источника метаданных (Настройки → Источники метаданных)"
+            )
+            return
+
+        task = app.tasks.create(
+            kind=TaskKind.METADATA_BULK_SEARCH,
+            title="Массовый поиск метаданных",
+            detail="Подготовка очереди...",
+            total=len(tracks),
+        )
+        app._metadata_bulk_task_contexts[task.id] = _BatchTaskContext(
+            pending_ids={track.id for track in tracks},
+            labels={
+                track.id: f"{track.metadata.artist or '—'} - {track.metadata.title or track.path.stem}"
+                for track in tracks
+            },
+        )
+        self.refresh_task_indicator()
+        app.page.run_task(self.run_metadata_bulk_search, task.id)
+
+    async def run_metadata_bulk_search(self, task_id: str) -> None:
+        app = self.app
+        task = app.tasks.get(task_id)
+        context = app._metadata_bulk_task_contexts.get(task_id)
+        if task is None or context is None:
+            return
+
+        provider_ids = app.settings.metadata_providers
+        threshold = app.settings.metadata_auto_apply_threshold / 100.0
+        pending_ids = context.pending_ids
+        changed = False
+        applied = 0
+        flagged = 0
+        errors = 0
+
+        try:
+            while pending_ids:
+                task.checkpoint()
+                track_id = next(iter(pending_ids))
+                label = context.labels.get(track_id, f"track_id={track_id}")
+                task.set_progress(detail=f"Поиск: {label}")
+                try:
+                    outcome = await self._process_metadata_bulk_track(
+                        track_id, provider_ids, threshold
+                    )
+                except (TaskPaused, TaskCancelled):
+                    raise
+                except Exception as exc:
+                    LOGGER.warning("Не удалось обработать %s: %s", label, exc)
+                    errors += 1
+                    task.advance(success=False, detail=f"{label}: ошибка")
+                else:
+                    if outcome == "applied":
+                        applied += 1
+                        changed = True
+                    else:
+                        flagged += 1
+                    task.advance(success=True, detail=f"{label}: {outcome}")
+                finally:
+                    pending_ids.discard(track_id)
+
+            task.mark_completed(
+                f"Готово: применено {applied}, на проверку {flagged}, ошибок {errors}"
+            )
+            self.forget_task_context(task_id)
+            app._notify(
+                f"Массовый поиск завершён: применено {applied}, "
+                f"на проверку {flagged}, ошибок {errors}"
+            )
+        except TaskPaused:
+            task.mark_paused("Остановлено · можно продолжить")
+            app._notify("Массовый поиск остановлен")
+        except TaskCancelled:
+            task.mark_cancelled()
+            self.forget_task_context(task_id)
+            app._notify("Массовый поиск отменён")
+        except Exception as exc:
+            LOGGER.exception("Ошибка массового поиска метаданных")
+            task.mark_failed(exc)
+            self.forget_task_context(task_id)
+            app._notify(f"Не удалось выполнить массовый поиск: {exc}")
+        finally:
+            self.refresh_task_indicator()
+            if changed and app.navigation.selected_index == 0:
+                app.show_library()
+            elif app.navigation.selected_index == 3:
+                app.show_plugins()
+            else:
+                app.page.update()
+
+    async def _process_metadata_bulk_track(
+        self, track_id: int, provider_ids: tuple[str, ...], threshold: float
+    ) -> str:
+        """Ищет метаданные одного трека и применяет их либо помечает на проверку.
+
+        Возвращает "applied" или "flagged". Выполняется строго последовательно
+        (не в пуле потоков), чтобы release_if_current перед записью тегов
+        оставался на основном asyncio-цикле, как в одиночном сценарии поиска.
+        """
+        app = self.app
+        track = await app.workers.run(app.service.database.get_track, track_id)
+        if track is None:
+            return "flagged"
+
+        candidates = await app.workers.run(
+            app.service.search_metadata, track_id, provider_ids, 8
+        )
+        if not candidates:
+            await app.workers.run(
+                app.service.database.set_metadata_review,
+                track_id,
+                reason="not_found",
+                score=None,
+            )
+            return "flagged"
+
+        best = max(candidates, key=lambda candidate: match_confidence(track, candidate))
+        score = match_confidence(track, best)
+        if score >= threshold:
+            await app.player.release_if_current(track_id)
+            await app.workers.run(app.service.apply_candidate, track_id, best)
+            return "applied"
+
+        await app.workers.run(
+            app.service.database.set_metadata_review,
+            track_id,
+            reason="low_confidence",
+            score=score,
+        )
+        return "flagged"
 
     async def ensure_embedded_artwork(self) -> None:
         """Индексирует встроенные обложки как управляемую фоновую задачу."""

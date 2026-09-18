@@ -527,6 +527,7 @@ class LibrarySearchController:
         app.search_clear_button.visible = False
         app._selected_library_track_ids.clear()
         app._library_batch_add_button = None
+        app._library_batch_select_all_button = None
         app._library_batch_clear_button = None
         app._search_revision += 1
         app._waveform_views.clear()

@@ -69,6 +69,7 @@ class PlaylistUIFlowTests(unittest.IsolatedAsyncioTestCase):
         ui._library_list = None
         ui._selected_library_track_ids = set()
         ui._library_batch_add_button = None
+        ui._library_batch_select_all_button = None
         ui._library_batch_clear_button = None
         for name in (
             "_audio_task_contexts",
@@ -76,6 +77,7 @@ class PlaylistUIFlowTests(unittest.IsolatedAsyncioTestCase):
             "_drop_task_paths",
             "_artwork_task_contexts",
             "_waveform_task_contexts",
+            "_metadata_bulk_task_contexts",
         ):
             setattr(ui, name, {})
         ui.tasks = TaskManager()
@@ -160,6 +162,44 @@ class PlaylistUIFlowTests(unittest.IsolatedAsyncioTestCase):
         ui._clear_library_selection()
         self.assertEqual(ui._selected_library_track_ids, set())
         ui.show_library.assert_called_once_with(local_update=True)
+
+    def test_select_all_selects_every_visible_track(self) -> None:
+        ui = self.ui
+        ui._library_track_indices = {self.ids[0]: 0, self.ids[1]: 1}
+        controls = ui._library_batch_controls()
+
+        select_all_button = controls.controls[1]
+        self.assertEqual(select_all_button.tooltip, "Выделить все")
+        self.assertFalse(select_all_button.disabled)
+
+        ui._select_all_library_tracks()
+
+        self.assertEqual(ui._selected_library_track_ids, set(self.ids))
+        ui.show_library.assert_called_once_with(local_update=True)
+
+    def test_select_all_button_disabled_when_library_is_empty(self) -> None:
+        ui = self.ui
+        ui._library_track_indices = {}
+        controls = ui._library_batch_controls()
+
+        self.assertTrue(controls.controls[1].disabled)
+
+    def test_select_all_does_nothing_when_library_is_empty(self) -> None:
+        ui = self.ui
+        ui._library_track_indices = {}
+
+        ui._select_all_library_tracks()
+
+        ui.show_library.assert_not_called()
+
+    def test_select_all_preserves_previously_selected_tracks(self) -> None:
+        ui = self.ui
+        ui._library_track_indices = {self.ids[0]: 0, self.ids[1]: 1}
+        ui._selected_library_track_ids = {self.ids[0]}
+
+        ui._select_all_library_tracks()
+
+        self.assertEqual(ui._selected_library_track_ids, set(self.ids))
 
     def test_batch_add_uses_current_library_order_and_reports_duplicates(self) -> None:
         ui = self.ui

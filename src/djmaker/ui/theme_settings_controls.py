@@ -14,7 +14,14 @@ import flet as ft
 from djmaker.config import DEFAULT_ORGANIZE_TEMPLATE
 from djmaker.domain.library_sort import LIBRARY_SORT_LABELS
 from djmaker.runtime.dependencies import DependencyStatus, RuntimeReport
-from djmaker.settings import AppSettings, THEME_COLOR_ROLES, THEME_MODES, is_valid_theme_color
+from djmaker.settings import (
+    AppSettings,
+    METADATA_AUTO_APPLY_THRESHOLD_MAX,
+    METADATA_AUTO_APPLY_THRESHOLD_MIN,
+    THEME_COLOR_ROLES,
+    THEME_MODES,
+    is_valid_theme_color,
+)
 from djmaker.ui.density import COMPACT_UI
 from djmaker.ui.theme import (
     THEME_MODE_LABELS,
@@ -651,9 +658,46 @@ class ThemeSettingsController:
                         size=COMPACT_UI.font_xs,
                     ),
                     *rows,
+                    ft.Divider(height=1, color=ft.Colors.OUTLINE_VARIANT),
+                    ft.Text(
+                        "Порог автоприменения при массовом поиске: "
+                        f"{app.settings.metadata_auto_apply_threshold}%",
+                        size=COMPACT_UI.font_xs,
+                    ),
+                    ft.Slider(
+                        min=METADATA_AUTO_APPLY_THRESHOLD_MIN,
+                        max=METADATA_AUTO_APPLY_THRESHOLD_MAX,
+                        divisions=(METADATA_AUTO_APPLY_THRESHOLD_MAX - METADATA_AUTO_APPLY_THRESHOLD_MIN)
+                        // 5,
+                        value=app.settings.metadata_auto_apply_threshold,
+                        label="{value}%",
+                        on_change_end=self.on_metadata_threshold_changed,
+                    ),
+                    ft.Text(
+                        "Совпадения выше порога применяются автоматически; ниже — "
+                        "трек помечается «требует проверки».",
+                        size=COMPACT_UI.font_micro,
+                        color=ft.Colors.ON_SURFACE_VARIANT,
+                    ),
                 ],
                 spacing=5,
             )
+        )
+
+    def on_metadata_threshold_changed(self, event: object) -> None:
+        app = self.app
+        control = getattr(event, "control", None)
+        value = getattr(control, "value", None)
+        try:
+            threshold = int(round(float(value)))
+        except (TypeError, ValueError):
+            return
+        threshold = min(
+            METADATA_AUTO_APPLY_THRESHOLD_MAX,
+            max(METADATA_AUTO_APPLY_THRESHOLD_MIN, threshold),
+        )
+        self.save_and_apply_settings(
+            replace(app.settings, metadata_auto_apply_threshold=threshold)
         )
 
     def on_metadata_provider_toggled(self, event: object, provider_id: str) -> None:

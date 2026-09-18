@@ -186,7 +186,7 @@ class PlaylistRepositoryTests(unittest.TestCase):
         repo.add(ident, old.list_tracks()[0].id)
         self.assertEqual(len(repo.tracks(ident)), 1)
         with old.connection() as conn:
-            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 7)
+            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 8)
             self.assertEqual(conn.execute("PRAGMA foreign_key_check").fetchall(), [])
 
     def test_v4_migration_recovers_from_partially_created_playlist_schema(self) -> None:
@@ -207,7 +207,7 @@ class PlaylistRepositoryTests(unittest.TestCase):
         ident = repo.create("Восстановлено")
         self.assertEqual(repo.tracks(ident), [])
         with old.connection() as conn:
-            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 7)
+            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 8)
 
     def test_create_with_track_is_atomic(self) -> None:
         with self.assertRaises(PlaylistError):

@@ -95,6 +95,7 @@ class DJMakerUI(BeatGridEditorUI, PlaylistUI):
         self._drop_task_paths: dict[str, tuple[Path, ...]] = {}
         self._artwork_task_contexts: dict[str, _BatchTaskContext] = {}
         self._waveform_task_contexts: dict[str, _WaveformTaskContext] = {}
+        self._metadata_bulk_task_contexts: dict[str, _BatchTaskContext] = {}
         self._waveform_views: dict[int, _WaveformView] = {}
         self._library_list: ft.ListView | None = None
         self._library_track_indices: dict[int, int] = {}
@@ -102,6 +103,7 @@ class DJMakerUI(BeatGridEditorUI, PlaylistUI):
         self._selected_track_id: int | None = None
         self._selected_library_track_ids: set[int] = set()
         self._library_batch_add_button: ft.Button | None = None
+        self._library_batch_select_all_button: ft.IconButton | None = None
         self._library_batch_clear_button: ft.IconButton | None = None
         self._library_viewport_extent = 0.0
         self._library_max_scroll_extent = 0.0
@@ -711,6 +713,15 @@ class DJMakerUI(BeatGridEditorUI, PlaylistUI):
 
     async def _run_waveform_analysis(self, task_id: str) -> None:
         await self.task_progress.run_waveform_analysis(task_id)
+
+    def _start_metadata_bulk_search(self, tracks: list[TrackRecord]) -> None:
+        self.task_progress.start_metadata_bulk_search(tracks)
+
+    async def _run_metadata_bulk_search(self, task_id: str) -> None:
+        await self.task_progress.run_metadata_bulk_search(task_id)
+
+    def _dismiss_metadata_review(self, track_id: int) -> None:
+        self.navigation_cards.dismiss_metadata_review(track_id)
 
     @staticmethod
     def _analysis_label(track: TrackRecord) -> str:

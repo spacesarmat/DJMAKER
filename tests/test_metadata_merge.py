@@ -3,14 +3,34 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 
-from djmaker.domain.models import MetadataCandidate
-from djmaker.plugins.merge import merge_candidates
+from djmaker.domain.models import (
+    AudioMetadata,
+    AudioTechnicalInfo,
+    MetadataCandidate,
+    TrackRecord,
+)
+from djmaker.plugins.merge import match_confidence, merge_candidates
 
 
 def _candidate(provider_id: str, title: str, artist: str, **kwargs: object) -> MetadataCandidate:
     return MetadataCandidate(
         provider_id=provider_id, external_id="x", title=title, artist=artist, **kwargs
+    )
+
+
+def _track(title: str = "Song", artist: str = "Artist") -> TrackRecord:
+    return TrackRecord(
+        id=1,
+        path=Path("/music/track.mp3"),
+        root_path=Path("/music"),
+        size=1,
+        mtime_ns=0,
+        extension=".mp3",
+        file_hash="hash",
+        metadata=AudioMetadata(title=title, artist=artist),
+        technical=AudioTechnicalInfo(),
     )
 
 
@@ -68,6 +88,48 @@ class MergeCandidatesTests(unittest.TestCase):
 
         self.assertEqual(spotify_first[0].album, "Spotify Album")
         self.assertEqual(musicbrainz_first[0].album, "MB Album")
+
+
+class MatchConfidenceTests(unittest.TestCase):
+    def test_exact_title_and_artist_match_scores_high(self) -> None:
+        track = _track(title="Shatter and Spin", artist="DataFunk")
+        candidate = _candidate("spotify", "Shatter and Spin", "DataFunk")
+
+        self.assertAlmostEqual(1.0, match_confidence(track, candidate))
+
+    def test_case_and_whitespace_do_not_affect_score(self) -> None:
+        track = _track(title="  Shatter AND Spin ", artist="datafunk")
+        candidate = _candidate("spotify", "shatter and spin", "DataFunk")
+
+        self.assertAlmostEqual(1.0, match_confidence(track, candidate))
+
+    def test_unrelated_candidate_scores_low(self) -> None:
+        track = _track(title="Shatter and Spin", artist="DataFunk")
+        candidate = _candidate("spotify", "Totally Different Track", "Someone Else")
+
+        self.assertLess(match_confidence(track, candidate), 0.5)
+
+    def test_missing_local_artist_compares_title_only(self) -> None:
+        track = _track(title="Shatter and Spin", artist="")
+        exact_title = _candidate("spotify", "Shatter and Spin", "Anyone At All")
+
+        self.assertAlmostEqual(1.0, match_confidence(track, exact_title))
+
+    def test_missing_local_title_falls_back_to_filename_stem(self) -> None:
+        track = TrackRecord(
+            id=1,
+            path=Path("/music/Shatter and Spin.mp3"),
+            root_path=Path("/music"),
+            size=1,
+            mtime_ns=0,
+            extension=".mp3",
+            file_hash="hash",
+            metadata=AudioMetadata(title="", artist="DataFunk"),
+            technical=AudioTechnicalInfo(),
+        )
+        candidate = _candidate("spotify", "Shatter and Spin", "DataFunk")
+
+        self.assertAlmostEqual(1.0, match_confidence(track, candidate))
 
 
 if __name__ == "__main__":

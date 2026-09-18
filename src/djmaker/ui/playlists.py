@@ -77,11 +77,18 @@ class PlaylistUI:
 
     def _library_batch_controls(self) -> ft.Row:
         count = len(getattr(self, "_selected_library_track_ids", set()))
+        visible_count = len(getattr(self, "_library_track_indices", {}))
         self._library_batch_add_button = ft.Button(
             content=f"В плейлист: {count}",
             icon=ft.Icons.PLAYLIST_ADD,
             disabled=count == 0,
             on_click=lambda _: self._add_selected_to_playlist_dialog(),
+        )
+        self._library_batch_select_all_button = ft.IconButton(
+            icon=ft.Icons.SELECT_ALL,
+            tooltip="Выделить все",
+            disabled=visible_count == 0,
+            on_click=lambda _: self._select_all_library_tracks(),
         )
         self._library_batch_clear_button = ft.IconButton(
             icon=ft.Icons.CLEAR_ALL,
@@ -92,6 +99,7 @@ class PlaylistUI:
         return ft.Row(
             controls=[
                 self._library_batch_add_button,
+                self._library_batch_select_all_button,
                 self._library_batch_clear_button,
             ],
             spacing=0,
@@ -100,16 +108,29 @@ class PlaylistUI:
 
     def _refresh_library_batch_controls(self) -> None:
         count = len(getattr(self, "_selected_library_track_ids", set()))
+        visible_count = len(getattr(self, "_library_track_indices", {}))
         controls: list[ft.Control] = []
         if self._library_batch_add_button is not None:
             self._library_batch_add_button.content = f"В плейлист: {count}"
             self._library_batch_add_button.disabled = count == 0
             controls.append(self._library_batch_add_button)
+        if self._library_batch_select_all_button is not None:
+            self._library_batch_select_all_button.disabled = visible_count == 0
+            controls.append(self._library_batch_select_all_button)
         if self._library_batch_clear_button is not None:
             self._library_batch_clear_button.disabled = count == 0
             controls.append(self._library_batch_clear_button)
         if controls:
             self.page.update(*controls)
+
+    def _select_all_library_tracks(self) -> None:
+        visible_ids = set(getattr(self, "_library_track_indices", {}).keys())
+        if not visible_ids:
+            return
+        if not hasattr(self, "_selected_library_track_ids"):
+            self._selected_library_track_ids = set()
+        self._selected_library_track_ids.update(visible_ids)
+        self.show_library(local_update=True)
 
     def _clear_library_selection(self) -> None:
         selected_track_ids = getattr(self, "_selected_library_track_ids", set())

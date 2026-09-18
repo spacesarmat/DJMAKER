@@ -31,7 +31,7 @@ from djmaker.infrastructure.playlists import create_playlist_schema
 from djmaker.infrastructure.set_timeline import create_set_timeline_schema
 
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 
 class DatabaseError(RuntimeError):
@@ -84,6 +84,9 @@ class LibraryDatabase:
                     if version == 6:
                         self._migrate_v6_to_v7(conn)
                         version = 7
+                    if version == 7:
+                        self._migrate_v7_to_v8(conn)
+                        version = 8
                     conn.execute(f"PRAGMA user_version={version}")
                     conn.commit()
         except sqlite3.Error as exc:
@@ -167,6 +170,9 @@ class LibraryDatabase:
                 waveform_analyzed_at TEXT,
                 beat_grid_json TEXT,
                 beat_grid_analyzed_at TEXT,
+                needs_metadata_review INTEGER NOT NULL DEFAULT 0,
+                metadata_review_reason TEXT NOT NULL DEFAULT '',
+                metadata_review_score REAL,
                 scan_token TEXT NOT NULL DEFAULT '',
                 added_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
@@ -238,6 +244,27 @@ class LibraryDatabase:
         if "beat_grid_analyzed_at" not in columns:
             conn.execute("ALTER TABLE tracks ADD COLUMN beat_grid_analyzed_at TEXT")
         create_beat_grid_schema(conn)
+
+    @staticmethod
+    def _migrate_v7_to_v8(conn: sqlite3.Connection) -> None:
+        """Добавляет персистентную пометку «требует проверки метаданных»."""
+        if not conn.in_transaction:
+            conn.execute("BEGIN IMMEDIATE")
+        columns = {
+            str(row[1]) for row in conn.execute("PRAGMA table_info(tracks)").fetchall()
+        }
+        if "needs_metadata_review" not in columns:
+            conn.execute(
+                "ALTER TABLE tracks ADD COLUMN needs_metadata_review "
+                "INTEGER NOT NULL DEFAULT 0"
+            )
+        if "metadata_review_reason" not in columns:
+            conn.execute(
+                "ALTER TABLE tracks ADD COLUMN metadata_review_reason "
+                "TEXT NOT NULL DEFAULT ''"
+            )
+        if "metadata_review_score" not in columns:
+            conn.execute("ALTER TABLE tracks ADD COLUMN metadata_review_score REAL")
 
     @staticmethod
     def _now() -> str:
@@ -661,7 +688,9 @@ class LibraryDatabase:
                         path=?, root_path=?, size=?, mtime_ns=?, extension=?, file_hash=?,
                         duration=?, bitrate=?, sample_rate=?, channels=?,
                         title=?, artist=?, album=?, album_artist=?, genre=?, year=?,
-                        track_number=?, disc_number=?, bpm=?, musical_key=?, updated_at=?
+                        track_number=?, disc_number=?, bpm=?, musical_key=?, updated_at=?,
+                        needs_metadata_review=0, metadata_review_reason='',
+                        metadata_review_score=NULL
                     WHERE id=?
                     """,
                     (
@@ -895,6 +924,56 @@ class LibraryDatabase:
         except sqlite3.Error as exc:
             raise DatabaseError(f"Не удалось сохранить URL обложки: {exc}") from exc
 
+    def set_metadata_review(self, track_id: int, *, reason: str, score: float | None) -> None:
+        """Помечает трек как требующий ручной проверки метаданных."""
+        try:
+            with self.connection() as conn:
+                conn.execute(
+                    "UPDATE tracks SET needs_metadata_review=1, "
+                    "metadata_review_reason=?, metadata_review_score=? WHERE id=?",
+                    (reason, score, track_id),
+                )
+                conn.commit()
+        except sqlite3.Error as exc:
+            raise DatabaseError(f"Не удалось пометить трек на проверку: {exc}") from exc
+
+    def clear_metadata_review(self, track_id: int) -> None:
+        """Снимает пометку «требует проверки» без изменения тегов."""
+        try:
+            with self.connection() as conn:
+                conn.execute(
+                    "UPDATE tracks SET needs_metadata_review=0, "
+                    "metadata_review_reason='', metadata_review_score=NULL WHERE id=?",
+                    (track_id,),
+                )
+                conn.commit()
+        except sqlite3.Error as exc:
+            raise DatabaseError(f"Не удалось снять пометку проверки: {exc}") from exc
+
+    def list_tracks_needing_review(self) -> list[TrackRecord]:
+        """Возвращает треки, помеченные как требующие ручной проверки метаданных."""
+        try:
+            with self.connection() as conn:
+                rows = conn.execute(
+                    "SELECT * FROM tracks WHERE needs_metadata_review=1 "
+                    "ORDER BY artist COLLATE NOCASE, title COLLATE NOCASE, id"
+                ).fetchall()
+        except sqlite3.Error as exc:
+            raise DatabaseError(f"Не удалось получить список треков на проверку: {exc}") from exc
+        return [self._row_to_track(row) for row in rows]
+
+    def count_tracks_needing_review(self) -> int:
+        """Возвращает число треков, требующих ручной проверки метаданных."""
+        try:
+            with self.connection() as conn:
+                return int(
+                    conn.execute(
+                        "SELECT COUNT(*) FROM tracks WHERE needs_metadata_review=1"
+                    ).fetchone()[0]
+                )
+        except sqlite3.Error as exc:
+            raise DatabaseError(f"Не удалось посчитать треки на проверку: {exc}") from exc
+
     @staticmethod
     def _row_to_track(row: sqlite3.Row) -> TrackRecord:
         return TrackRecord(
@@ -930,6 +1009,9 @@ class LibraryDatabase:
                 else None
             ),
             embedded_artwork_checked=bool(row["embedded_artwork_checked"]),
+            needs_metadata_review=bool(row["needs_metadata_review"]),
+            metadata_review_reason=str(row["metadata_review_reason"] or ""),
+            metadata_review_score=row["metadata_review_score"],
             analysis=(
                 AudioAnalysis(
                     bpm=row["analysis_bpm"],

@@ -296,7 +296,7 @@ class LibraryDatabaseTests(unittest.TestCase):
         self.assertEqual((0, 0), self.db.waveform_counts())
         with self.db.connection() as conn:
             self.assertEqual(
-                7,
+                8,
                 conn.execute("PRAGMA user_version").fetchone()[0],
             )
 
@@ -332,6 +332,66 @@ class LibraryDatabaseTests(unittest.TestCase):
         self.assertTrue(updated.embedded_artwork_checked)
         self.assertEqual("https://example.test/cover.jpg", updated.artwork_url)
 
+    def test_metadata_review_flag_round_trips(self) -> None:
+        self._insert("a.mp3", "hash-a")
+        track = self.db.list_tracks()[0]
+
+        self.db.set_metadata_review(track.id, reason="low_confidence", score=0.62)
+        flagged = self.db.get_track(track.id)
+        assert flagged is not None
+        self.assertTrue(flagged.needs_metadata_review)
+        self.assertEqual("low_confidence", flagged.metadata_review_reason)
+        self.assertAlmostEqual(0.62, flagged.metadata_review_score)
+
+        self.db.clear_metadata_review(track.id)
+        cleared = self.db.get_track(track.id)
+        assert cleared is not None
+        self.assertFalse(cleared.needs_metadata_review)
+        self.assertEqual("", cleared.metadata_review_reason)
+        self.assertIsNone(cleared.metadata_review_score)
+
+    def test_list_and_count_tracks_needing_review(self) -> None:
+        self._insert("a.mp3", "hash-a")
+        self._insert("b.mp3", "hash-b")
+        tracks = self.db.list_tracks()
+        self.db.set_metadata_review(tracks[0].id, reason="not_found", score=None)
+
+        self.assertEqual(1, self.db.count_tracks_needing_review())
+        flagged = self.db.list_tracks_needing_review()
+        self.assertEqual([tracks[0].id], [t.id for t in flagged])
+        self.assertEqual("not_found", flagged[0].metadata_review_reason)
+
+    def test_update_after_file_change_clears_review_flag(self) -> None:
+        self._insert("a.mp3", "hash-a")
+        track = self.db.list_tracks()[0]
+        self.db.set_metadata_review(track.id, reason="low_confidence", score=0.5)
+
+        self.db.update_after_file_change(
+            track.id,
+            new_path=track.path,
+            root=self.root,
+            size=track.size,
+            mtime_ns=track.mtime_ns,
+            file_hash="hash-a",
+            metadata=AudioMetadata(title="Updated", artist="Artist"),
+            technical=track.technical,
+        )
+
+        updated = self.db.get_track(track.id)
+        assert updated is not None
+        self.assertFalse(updated.needs_metadata_review)
+
+    def test_rescan_does_not_reset_existing_review_flag(self) -> None:
+        self._insert("a.mp3", "hash-a")
+        track = self.db.list_tracks()[0]
+        self.db.set_metadata_review(track.id, reason="not_found", score=None)
+
+        self._insert("a.mp3", "hash-a")  # повторное сканирование того же файла
+
+        unchanged = self.db.get_track(track.id)
+        assert unchanged is not None
+        self.assertTrue(unchanged.needs_metadata_review)
+
 
 class LibraryDatabaseMigrationTests(unittest.TestCase):
     def test_schema_v1_is_migrated_to_audio_analysis_columns(self) -> None:
@@ -352,7 +412,7 @@ class LibraryDatabaseMigrationTests(unittest.TestCase):
                     for row in conn.execute("PRAGMA table_info(tracks)").fetchall()
                 }
 
-            self.assertEqual(7, version)
+            self.assertEqual(8, version)
             self.assertIn("analysis_bpm", columns)
             self.assertIn("analysis_key", columns)
             self.assertIn("analysis_camelot", columns)
@@ -363,6 +423,9 @@ class LibraryDatabaseMigrationTests(unittest.TestCase):
             self.assertIn("waveform_analyzed_at", columns)
             self.assertIn("beat_grid_json", columns)
             self.assertIn("beat_grid_analyzed_at", columns)
+            self.assertIn("needs_metadata_review", columns)
+            self.assertIn("metadata_review_reason", columns)
+            self.assertIn("metadata_review_score", columns)
 
 
     def test_schema_v2_is_migrated_to_embedded_artwork_columns(self) -> None:
@@ -383,11 +446,12 @@ class LibraryDatabaseMigrationTests(unittest.TestCase):
                     for row in conn.execute("PRAGMA table_info(tracks)").fetchall()
                 }
 
-            self.assertEqual(7, version)
+            self.assertEqual(8, version)
             self.assertIn("embedded_artwork_path", columns)
             self.assertIn("embedded_artwork_checked", columns)
             self.assertIn("waveform_peaks", columns)
             self.assertIn("waveform_analyzed_at", columns)
+            self.assertIn("needs_metadata_review", columns)
 
     def test_schema_v3_is_migrated_to_waveform_columns(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -407,9 +471,10 @@ class LibraryDatabaseMigrationTests(unittest.TestCase):
                     for row in conn.execute("PRAGMA table_info(tracks)").fetchall()
                 }
 
-            self.assertEqual(7, version)
+            self.assertEqual(8, version)
             self.assertIn("waveform_peaks", columns)
             self.assertIn("waveform_analyzed_at", columns)
+            self.assertIn("needs_metadata_review", columns)
 
     def test_schema_v6_is_migrated_to_grid_columns_and_anchor_table(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -433,9 +498,10 @@ class LibraryDatabaseMigrationTests(unittest.TestCase):
                     "AND name='track_beat_grid_anchors'"
                 ).fetchone()
 
-            self.assertEqual(7, version)
+            self.assertEqual(8, version)
             self.assertIn("beat_grid_json", columns)
             self.assertIn("beat_grid_analyzed_at", columns)
+            self.assertIn("needs_metadata_review", columns)
             self.assertIsNotNone(anchor_table)
 
 

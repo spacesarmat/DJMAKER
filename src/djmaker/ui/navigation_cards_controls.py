@@ -323,7 +323,9 @@ class NavigationCardsController:
                     "Каждый внешний каталог или DJ-пул подключается отдельным плагином. "
                     "Ядро медиатеки от конкретного сервиса не зависит."
                 )
-            )
+            ),
+            self.bulk_metadata_search_card(),
+            self.metadata_review_card(),
         ]
         for provider in providers:
             controls.append(
@@ -357,6 +359,156 @@ class NavigationCardsController:
             "Плагины музыкальных каталогов и DJ-пулов",
             *controls,
         )
+
+    def bulk_metadata_search_card(self) -> ft.Control:
+        app = self.app
+        selected_ids = getattr(app, "_selected_library_track_ids", set())
+
+        def start_all(_: object) -> None:
+            try:
+                tracks = app.service.tracks(limit=10_000)
+            except RuntimeError as exc:
+                app._notify(str(exc))
+                return
+            app._start_metadata_bulk_search(tracks)
+
+        def start_selected(_: object) -> None:
+            tracks = [
+                track
+                for track_id in selected_ids
+                if (track := app.service.database.get_track(track_id)) is not None
+            ]
+            app._start_metadata_bulk_search(tracks)
+
+        return self.surface_card(
+            ft.Column(
+                controls=[
+                    ft.Row(
+                        controls=[
+                            ft.Icon(ft.Icons.TRAVEL_EXPLORE, color=ft.Colors.PRIMARY),
+                            ft.Text(
+                                "Массовый поиск метаданных",
+                                size=COMPACT_UI.font_lg,
+                                weight=ft.FontWeight.BOLD,
+                            ),
+                        ]
+                    ),
+                    ft.Text(
+                        "Совпадения выше порога (см. настройки) применяются "
+                        "автоматически; остальные попадают в «Требуют внимания» ниже.",
+                        size=COMPACT_UI.font_xs,
+                    ),
+                    ft.Row(
+                        controls=[
+                            ft.Button(
+                                content="Найти для всех",
+                                icon=ft.Icons.LIBRARY_MUSIC,
+                                on_click=start_all,
+                            ),
+                            ft.Button(
+                                content=f"Найти для выделенных ({len(selected_ids)})",
+                                icon=ft.Icons.CHECK_BOX_OUTLINED,
+                                disabled=not selected_ids,
+                                on_click=start_selected,
+                            ),
+                        ],
+                        spacing=COMPACT_UI.space_sm,
+                    ),
+                ],
+                spacing=5,
+            )
+        )
+
+    def metadata_review_card(self) -> ft.Control:
+        app = self.app
+        try:
+            flagged = app.service.database.list_tracks_needing_review()
+        except RuntimeError as exc:
+            app._notify(str(exc))
+            flagged = []
+
+        reason_labels = {
+            "not_found": "Не найдено",
+            "low_confidence": "Низкое совпадение",
+        }
+
+        rows: list[ft.Control] = []
+        for track in flagged:
+            reason = reason_labels.get(track.metadata_review_reason, track.metadata_review_reason)
+            score = track.metadata_review_score
+            detail = f"{reason} · {score:.0%}" if score is not None else reason
+            rows.append(
+                self.surface_card(
+                    ft.Row(
+                        controls=[
+                            ft.Column(
+                                controls=[
+                                    ft.Text(
+                                        track.metadata.title or track.path.stem,
+                                        weight=ft.FontWeight.BOLD,
+                                    ),
+                                    ft.Text(
+                                        f"{track.metadata.artist or '—'} · {detail}",
+                                        size=COMPACT_UI.font_xs,
+                                        color=ft.Colors.ON_SURFACE_VARIANT,
+                                    ),
+                                ],
+                                spacing=0,
+                                expand=True,
+                            ),
+                            ft.Button(
+                                content="Найти",
+                                icon=ft.Icons.SEARCH,
+                                on_click=lambda _, tid=track.id: app.page.run_task(
+                                    app._metadata_search, tid
+                                ),
+                            ),
+                            ft.IconButton(
+                                icon=ft.Icons.CLOSE,
+                                tooltip="Оставить как есть",
+                                on_click=lambda _, tid=track.id: app._dismiss_metadata_review(tid),
+                            ),
+                        ],
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    ),
+                    padding=5,
+                )
+            )
+
+        content: list[ft.Control] = [
+            ft.Row(
+                controls=[
+                    ft.Icon(ft.Icons.WARNING_AMBER, color=ft.Colors.ERROR),
+                    ft.Text(
+                        f"Требуют внимания ({len(flagged)})",
+                        size=COMPACT_UI.font_lg,
+                        weight=ft.FontWeight.BOLD,
+                    ),
+                ]
+            ),
+        ]
+        if rows:
+            content.extend(rows)
+        else:
+            content.append(
+                ft.Text(
+                    "Треков без уверенного совпадения нет.",
+                    size=COMPACT_UI.font_xs,
+                    color=ft.Colors.ON_SURFACE_VARIANT,
+                )
+            )
+
+        return self.surface_card(ft.Column(controls=content, spacing=5))
+
+    def dismiss_metadata_review(self, track_id: int) -> None:
+        app = self.app
+        try:
+            app.service.database.clear_metadata_review(track_id)
+        except RuntimeError as exc:
+            app._notify(str(exc))
+            return
+        if app.navigation.selected_index == 3:
+            self.show_plugins()
 
     def show_audio_modules(self) -> None:
         """Показывает доступные DSP-модули и управление анализом."""

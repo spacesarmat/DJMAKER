@@ -31,6 +31,7 @@ class TaskKind(StrEnum):
     PLAYLIST_EXPORT = "playlist_export"
     ARTWORK_INDEX = "artwork_index"
     WAVEFORM_ANALYSIS = "waveform_analysis"
+    METADATA_BULK_SEARCH = "metadata_bulk_search"
 
 
 ACTIVE_TASK_STATUSES = frozenset(

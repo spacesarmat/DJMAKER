@@ -105,6 +105,9 @@ class TrackRecord:
     embedded_artwork_checked: bool = False
     analysis: AudioAnalysis | None = None
     waveform: WaveformAnalysis | None = None
+    needs_metadata_review: bool = False
+    metadata_review_reason: str = ""
+    metadata_review_score: float | None = None
 
 
 @dataclass(slots=True)
