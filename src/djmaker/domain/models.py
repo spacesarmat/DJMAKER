@@ -143,3 +143,5 @@ class MetadataCandidate:
     release_id: str = ""
     artwork_url: str = ""
     genre: str = ""
+    bpm: float | None = None
+    musical_key: str = ""

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from djmaker.domain.models import (
@@ -317,24 +318,51 @@ class LibraryService:
     ) -> list[MetadataCandidate]:
         """Ищет метаданные трека через один или несколько внешних плагинов.
 
-        Провайдер, вернувший ошибку, пропускается (best-effort): остальные
-        результаты всё равно возвращаются. Исключение поднимается, только
-        если не сработал ни один из запрошенных провайдеров.
+        Провайдеры опрашиваются параллельно (каждый — независимый HTTP-запрос
+        со своим троттлингом), общее время сводится к самому медленному
+        источнику, а не к сумме всех. Провайдер, вернувший ошибку, пропускается
+        (best-effort): остальные результаты всё равно возвращаются. Исключение
+        поднимается, только если не сработал ни один из запрошенных провайдеров.
         """
         track = self._require_track(track_id)
-        per_provider: list[list[MetadataCandidate]] = []
+        results: dict[str, list[MetadataCandidate]] = {}
         errors: list[str] = []
-        for provider_id in provider_ids:
+
+        def search_one(provider_id: str) -> tuple[str, list[MetadataCandidate] | None, str | None]:
             try:
                 provider = self.plugins.get(provider_id)
-                per_provider.append(provider.search(track, limit=limit))
+                return provider_id, provider.search(track, limit=limit), None
             except (MetadataProviderError, KeyError) as exc:
-                LOGGER.warning("Провайдер метаданных %s недоступен: %s", provider_id, exc)
-                errors.append(f"{provider_id}: {exc}")
+                return provider_id, None, str(exc)
 
-        if not per_provider and errors:
+        with ThreadPoolExecutor(max_workers=max(1, len(provider_ids))) as executor:
+            for provider_id, candidates, error in executor.map(search_one, provider_ids):
+                if error is not None:
+                    LOGGER.warning("Провайдер метаданных %s недоступен: %s", provider_id, error)
+                    errors.append(f"{provider_id}: {error}")
+                else:
+                    assert candidates is not None
+                    results[provider_id] = candidates
+
+        if not results and errors:
             raise LibraryServiceError("; ".join(errors))
+        # Порядок задаёт приоритет при merge — сохраняем порядок provider_ids,
+        # а не порядок завершения потоков.
+        per_provider = [results[pid] for pid in provider_ids if pid in results]
         return merge_candidates(per_provider)
+
+    def search_single_provider(
+        self, track_id: int, provider_id: str, limit: int = 10
+    ) -> list[MetadataCandidate]:
+        """Ищет метаданные трека через один конкретный провайдер.
+
+        Используется массовым поиском для тонкой параллелизации по парам
+        (трек, провайдер) — вместо того, чтобы каждый трек ждал все свои
+        провайдеры последовательно, свободный воркер сразу берёт следующую
+        пару, независимо от того, какому треку она принадлежит.
+        """
+        track = self._require_track(track_id)
+        return self.plugins.get(provider_id).search(track, limit=limit)
 
     def apply_candidate(self, track_id: int, candidate: MetadataCandidate) -> TrackRecord:
         """Применяет найденные метаданные и сохраняет URL обложки."""
@@ -348,8 +376,8 @@ class LibraryService:
             year=candidate.year or current.metadata.year,
             track_number=current.metadata.track_number,
             disc_number=current.metadata.disc_number,
-            bpm=current.metadata.bpm,
-            musical_key=current.metadata.musical_key,
+            bpm=candidate.bpm or current.metadata.bpm,
+            musical_key=candidate.musical_key or current.metadata.musical_key,
         )
         updated = self.update_tags(track_id, metadata)
         if candidate.artwork_url:

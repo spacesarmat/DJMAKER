@@ -24,6 +24,7 @@ class ReleaseIfCurrentTests(unittest.TestCase):
         app.audio.release = AsyncMock()
         app._player_duration_ms = 0
         app._player_position_ms = 0
+        app._player_switch_lock = asyncio.Lock()
         return app
 
     def test_releases_audio_when_track_is_currently_loaded(self) -> None:
@@ -62,6 +63,63 @@ class ReleaseIfCurrentTests(unittest.TestCase):
         controller = PlayerControlsController(app)
 
         _run(controller.release_if_current(7))  # must not raise
+
+    def test_waits_for_player_switch_lock_before_touching_audio(self) -> None:
+        """Регрессия гонки: release() во время активного play()/смены source
+        вешает RPC-вызов play() на стороне Flet (видели TimeoutException 30s).
+        release_if_current должен ждать тот же _player_switch_lock, что и
+        play_track/play_external_audio, а не трогать audio в обход него.
+        """
+
+        async def scenario() -> list[str]:
+            app = self._app()
+            app._player_track_id = 7
+            controller = PlayerControlsController(app)
+            order: list[str] = []
+
+            async def holds_lock_like_play_track() -> None:
+                async with app._player_switch_lock:
+                    order.append("play-acquired")
+                    await asyncio.sleep(0.05)
+                    order.append("play-released")
+
+            hold_task = asyncio.create_task(holds_lock_like_play_track())
+            await asyncio.sleep(0.01)  # дать play_track захватить лок первым
+            await controller.release_if_current(7)
+            order.append("release_if_current-done")
+            await hold_task
+            return order
+
+        order = _run(scenario())
+
+        self.assertEqual(
+            order, ["play-acquired", "play-released", "release_if_current-done"]
+        )
+
+    def test_rechecks_current_track_after_acquiring_lock(self) -> None:
+        """Пока release_if_current ждал лок, плеер мог переключиться на другой
+        трек — после захвата лока нужно проверить это состояние заново."""
+
+        async def scenario() -> Mock:
+            app = self._app()
+            app._player_track_id = 7
+            controller = PlayerControlsController(app)
+
+            async def switch_track_while_locked() -> None:
+                async with app._player_switch_lock:
+                    app._player_track_id = 99
+                    await asyncio.sleep(0.02)
+
+            hold_task = asyncio.create_task(switch_track_while_locked())
+            await asyncio.sleep(0.005)
+            await controller.release_if_current(7)
+            await hold_task
+            return app
+
+        app = _run(scenario())
+
+        app.audio.pause.assert_not_called()
+        app.audio.release.assert_not_called()
 
 
 class TagWriteErrorMessageTests(unittest.TestCase):

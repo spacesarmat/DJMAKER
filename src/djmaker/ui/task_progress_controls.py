@@ -12,8 +12,8 @@ from typing import TYPE_CHECKING
 
 import flet as ft
 
-from djmaker.domain.models import TrackRecord
-from djmaker.plugins.merge import match_confidence
+from djmaker.domain.models import MetadataCandidate, TrackRecord
+from djmaker.plugins.merge import match_confidence, merge_candidates
 from djmaker.services.audio_analysis import recommended_analysis_concurrency
 from djmaker.services.tasks import TaskCancelled, TaskKind, TaskPaused, TaskSnapshot, TaskStatus
 from djmaker.ui.density import COMPACT_UI
@@ -638,6 +638,15 @@ class TaskProgressController:
         app.page.run_task(self.run_metadata_bulk_search, task.id)
 
     async def run_metadata_bulk_search(self, task_id: str) -> None:
+        """Массовый поиск: общий пул воркеров разбирает пары (трек, провайдер).
+
+        Все пары ставятся в очередь сразу — как только какой-то поиск
+        завершается, освободившийся воркер берёт следующую пару, независимо
+        от того, какому треку она принадлежит (это и даёт выигрыш от
+        параллелизма при большом числе треков и провайдеров). Когда для
+        трека отчитались все его провайдеры — результаты объединяются и
+        применяются/помечаются на основном цикле (см. _finish_metadata_bulk_track).
+        """
         app = self.app
         task = app.tasks.get(task_id)
         context = app._metadata_bulk_task_contexts.get(task_id)
@@ -646,37 +655,89 @@ class TaskProgressController:
 
         provider_ids = app.settings.metadata_providers
         threshold = app.settings.metadata_auto_apply_threshold / 100.0
-        pending_ids = context.pending_ids
+        track_ids = sorted(context.pending_ids)
+        pairs = [
+            (track_id, provider_id) for track_id in track_ids for provider_id in provider_ids
+        ]
+
         changed = False
         applied = 0
         flagged = 0
         errors = 0
 
+        per_provider_results: dict[int, dict[str, list[MetadataCandidate]]] = {
+            track_id: {} for track_id in track_ids
+        }
+        failed_provider_counts: dict[int, int] = {track_id: 0 for track_id in track_ids}
+        remaining_providers: dict[int, int] = {
+            track_id: len(provider_ids) for track_id in track_ids
+        }
+
+        def search_pair(
+            pair: tuple[int, str],
+        ) -> tuple[list[MetadataCandidate] | None, Exception | None]:
+            track_id, provider_id = pair
+            try:
+                return app.service.search_single_provider(track_id, provider_id, 8), None
+            except Exception as exc:  # best-effort, как в LibraryService.search_metadata
+                return None, exc
+
         try:
-            while pending_ids:
+            if not pairs:
+                task.mark_completed("Нет треков для обработки")
+                self.forget_task_context(task_id)
+                return
+
+            task.set_progress(total=len(pairs), detail="Поиск метаданных...")
+
+            async for outcome in app.workers.run_many_unordered(search_pair, pairs):
                 task.checkpoint()
-                track_id = next(iter(pending_ids))
+                track_id, provider_id = outcome.item
+                if outcome.error is not None:
+                    candidates, exc = None, outcome.error
+                else:
+                    candidates, exc = outcome.value
+
+                if exc is not None:
+                    LOGGER.warning(
+                        "Провайдер %s недоступен для трека %s: %s", provider_id, track_id, exc
+                    )
+                    failed_provider_counts[track_id] += 1
+                else:
+                    per_provider_results[track_id][provider_id] = candidates or []
+
+                remaining_providers[track_id] -= 1
+                task.advance(success=exc is None, detail=f"{provider_id} · {track_id}")
+
+                if remaining_providers[track_id] > 0:
+                    continue
+
                 label = context.labels.get(track_id, f"track_id={track_id}")
-                task.set_progress(detail=f"Поиск: {label}")
                 try:
-                    outcome = await self._process_metadata_bulk_track(
-                        track_id, provider_ids, threshold
+                    outcome_kind = await self._finish_metadata_bulk_track(
+                        track_id,
+                        per_provider_results.pop(track_id),
+                        provider_ids,
+                        threshold,
+                        all_providers_failed=(
+                            failed_provider_counts[track_id] == len(provider_ids)
+                        ),
                     )
                 except (TaskPaused, TaskCancelled):
                     raise
                 except Exception as exc:
-                    LOGGER.warning("Не удалось обработать %s: %s", label, exc)
+                    LOGGER.warning("Не удалось завершить обработку %s: %s", label, exc)
                     errors += 1
-                    task.advance(success=False, detail=f"{label}: ошибка")
+                    task.set_progress(detail=f"{label}: ошибка")
                 else:
-                    if outcome == "applied":
+                    if outcome_kind == "applied":
                         applied += 1
                         changed = True
                     else:
                         flagged += 1
-                    task.advance(success=True, detail=f"{label}: {outcome}")
+                    task.set_progress(detail=f"{label}: {outcome_kind}")
                 finally:
-                    pending_ids.discard(track_id)
+                    context.pending_ids.discard(track_id)
 
             task.mark_completed(
                 f"Готово: применено {applied}, на проверку {flagged}, ошибок {errors}"
@@ -707,28 +768,39 @@ class TaskProgressController:
             else:
                 app.page.update()
 
-    async def _process_metadata_bulk_track(
-        self, track_id: int, provider_ids: tuple[str, ...], threshold: float
+    async def _finish_metadata_bulk_track(
+        self,
+        track_id: int,
+        per_provider: dict[str, list[MetadataCandidate]],
+        provider_ids: tuple[str, ...],
+        threshold: float,
+        *,
+        all_providers_failed: bool,
     ) -> str:
-        """Ищет метаданные одного трека и применяет их либо помечает на проверку.
+        """Объединяет собранные по всем провайдерам результаты одного трека и
+        применяет либо помечает его на проверку.
 
-        Возвращает "applied" или "flagged". Выполняется строго последовательно
-        (не в пуле потоков), чтобы release_if_current перед записью тегов
-        оставался на основном asyncio-цикле, как в одиночном сценарии поиска.
+        Вызывается на основном asyncio-цикле (не в worker-потоке) уже после
+        того, как все провайдеры для этого трека отчитались — поэтому
+        release_if_current перед записью тегов остаётся safe для UI-состояния
+        плеера, как и в одиночном сценарии поиска.
         """
         app = self.app
         track = await app.workers.run(app.service.database.get_track, track_id)
         if track is None:
             return "flagged"
 
-        candidates = await app.workers.run(
-            app.service.search_metadata, track_id, provider_ids, 8
-        )
+        # Порядок задаёт приоритет при merge — по настройкам, а не по тому,
+        # какой провайдер отчитался первым.
+        ordered = [per_provider.get(provider_id, []) for provider_id in provider_ids]
+        candidates = merge_candidates(ordered)
+
         if not candidates:
+            reason = "search_failed" if all_providers_failed else "not_found"
             await app.workers.run(
                 app.service.database.set_metadata_review,
                 track_id,
-                reason="not_found",
+                reason=reason,
                 score=None,
             )
             return "flagged"

@@ -430,6 +430,7 @@ class NavigationCardsController:
         reason_labels = {
             "not_found": "Не найдено",
             "low_confidence": "Низкое совпадение",
+            "search_failed": "Все источники недоступны",
         }
 
         rows: list[ft.Control] = []

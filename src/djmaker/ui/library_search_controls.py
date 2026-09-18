@@ -1088,13 +1088,13 @@ class LibrarySearchController:
             ("Альбом", current.metadata.album, candidate.album),
             ("Год", current.metadata.year, candidate.year),
             ("Жанр", current.metadata.genre, candidate.genre),
+            ("BPM", current.metadata.bpm, candidate.bpm),
+            ("Тональность", current.metadata.musical_key, candidate.musical_key),
         ]
         unchanged_only = [
             ("Альбом-исполнитель", current.metadata.album_artist),
             ("Трек №", current.metadata.track_number),
             ("Диск №", current.metadata.disc_number),
-            ("BPM", current.metadata.bpm),
-            ("Тональность", current.metadata.musical_key),
         ]
 
         rows: list[ft.Control] = []

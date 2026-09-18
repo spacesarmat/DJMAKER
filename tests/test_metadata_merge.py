@@ -89,6 +89,27 @@ class MergeCandidatesTests(unittest.TestCase):
         self.assertEqual(spotify_first[0].album, "Spotify Album")
         self.assertEqual(musicbrainz_first[0].album, "MB Album")
 
+    def test_bpm_and_musical_key_are_filled_from_other_provider(self) -> None:
+        beatport = [
+            _candidate("beatport", "Song", "Artist", bpm=123.0, musical_key="D Major")
+        ]
+        spotify = [_candidate("spotify", "Song", "Artist", album="Spotify Album")]
+
+        merged = merge_candidates([spotify, beatport])
+
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0].album, "Spotify Album")
+        self.assertEqual(merged[0].bpm, 123.0)
+        self.assertEqual(merged[0].musical_key, "D Major")
+
+    def test_zero_bpm_is_treated_as_missing(self) -> None:
+        a = [_candidate("a", "Song", "Artist", bpm=0.0)]
+        b = [_candidate("b", "Song", "Artist", bpm=140.0)]
+
+        merged = merge_candidates([a, b])
+
+        self.assertEqual(merged[0].bpm, 140.0)
+
 
 class MatchConfidenceTests(unittest.TestCase):
     def test_exact_title_and_artist_match_scores_high(self) -> None:

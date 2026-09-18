@@ -136,20 +136,27 @@ class PlayerControlsController:
         паузе, из-за чего mutagen получает PermissionError при записи тегов.
         release() освобождает ресурс; при следующем resume()/смене источника
         плеер откроет файл заново.
+
+        Обязательно берём _player_switch_lock — тот же лок, что и play_track/
+        play_external_audio. Без него release() может прилететь на тот же
+        Audio-контрол ровно во время конкурентного play()/смены source
+        (например, пока идёт массовый поиск метаданных), и RPC-вызов play()
+        зависает на стороне Flet до тайм-аута (видели TimeoutException 30s).
         """
         app = self.app
-        if app.audio is None or app._player_track_id != track_id:
-            return
-        try:
-            await app.audio.pause()
-            await app.audio.release()
-        except Exception:
-            LOGGER.debug(
-                "Не удалось освободить аудио-ресурс перед записью тегов", exc_info=True
-            )
-            return
-        app._player_state = fta.AudioState.STOPPED
-        self.refresh_player_controls()
+        async with app._player_switch_lock:
+            if app.audio is None or app._player_track_id != track_id:
+                return
+            try:
+                await app.audio.pause()
+                await app.audio.release()
+            except Exception:
+                LOGGER.debug(
+                    "Не удалось освободить аудио-ресурс перед записью тегов", exc_info=True
+                )
+                return
+            app._player_state = fta.AudioState.STOPPED
+            self.refresh_player_controls()
         app.page.update(app.player_play_button)
 
     async def stop_player(self, _: object) -> None:

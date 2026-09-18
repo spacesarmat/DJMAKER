@@ -29,7 +29,15 @@ THEME_PALETTES = (
 DEFAULT_THEME_MODE = "system"
 DEFAULT_THEME_PALETTE = "djmaker_blue"
 
-KNOWN_METADATA_PROVIDERS = ("musicbrainz", "spotify")
+KNOWN_METADATA_PROVIDERS = (
+    "musicbrainz",
+    "spotify",
+    "deezer",
+    "apple_music",
+    "beatport",
+    "yandex_music",
+    "soundcloud",
+)
 DEFAULT_METADATA_PROVIDERS: tuple[str, ...] = ("musicbrainz",)
 METADATA_AUTO_APPLY_THRESHOLD_MIN = 50
 METADATA_AUTO_APPLY_THRESHOLD_MAX = 100

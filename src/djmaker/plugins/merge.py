@@ -7,7 +7,17 @@ from difflib import SequenceMatcher
 
 from djmaker.domain.models import MetadataCandidate, TrackRecord
 
-_MERGEABLE_FIELDS = ("title", "artist", "album", "year", "artwork_url", "genre", "release_id")
+_MERGEABLE_FIELDS = (
+    "title",
+    "artist",
+    "album",
+    "year",
+    "artwork_url",
+    "genre",
+    "release_id",
+    "bpm",
+    "musical_key",
+)
 _WHITESPACE_RE = re.compile(r"\s+")
 
 
@@ -59,7 +69,7 @@ def merge_candidates(per_provider: list[list[MetadataCandidate]]) -> list[Metada
             merged.append(group[0])
             continue
 
-        fields: dict[str, str] = {}
+        fields: dict[str, object] = {}
         for field_name in _MERGEABLE_FIELDS:
             for candidate in group:
                 value = getattr(candidate, field_name)
@@ -83,6 +93,8 @@ def merge_candidates(per_provider: list[list[MetadataCandidate]]) -> list[Metada
                 release_id=fields.get("release_id", ""),
                 artwork_url=fields.get("artwork_url", ""),
                 genre=fields.get("genre", ""),
+                bpm=fields.get("bpm"),
+                musical_key=fields.get("musical_key", ""),
             )
         )
 

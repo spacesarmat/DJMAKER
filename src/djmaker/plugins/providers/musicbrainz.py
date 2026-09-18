@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import threading
 import time
 import urllib.error
 import urllib.parse
@@ -14,6 +13,12 @@ from typing import Any
 from djmaker import __version__
 from djmaker.domain.models import MetadataCandidate, TrackRecord
 from djmaker.plugins.base import MetadataProvider, MetadataProviderError
+from djmaker.plugins.http_utils import (
+    RateLimiter,
+    is_server_error,
+    retry_after_seconds,
+    urlopen_with_retry,
+)
 
 
 class MusicBrainzProvider(MetadataProvider):
@@ -24,8 +29,7 @@ class MusicBrainzProvider(MetadataProvider):
     _base_url = "https://musicbrainz.org/ws/2/recording/"
 
     def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._last_request = 0.0
+        self._limiter = RateLimiter(1.05)
 
     def search(self, track: TrackRecord, limit: int = 10) -> list[MetadataCandidate]:
         """Ищет записи MusicBrainz по title/artist локального трека."""
@@ -45,7 +49,6 @@ class MusicBrainzProvider(MetadataProvider):
         )
         url = f"{self._base_url}?{params}"
 
-        self._throttle()
         request = urllib.request.Request(
             url,
             headers={
@@ -53,11 +56,7 @@ class MusicBrainzProvider(MetadataProvider):
                 "User-Agent": self._user_agent(),
             },
         )
-        try:
-            with urllib.request.urlopen(request, timeout=15) as response:
-                payload = response.read()
-        except (urllib.error.URLError, TimeoutError, OSError) as exc:
-            raise MetadataProviderError(f"MusicBrainz недоступен: {exc}") from exc
+        payload = self._request(request)
 
         try:
             data = json.loads(payload.decode("utf-8"))
@@ -123,12 +122,15 @@ class MusicBrainzProvider(MetadataProvider):
         named.sort(key=lambda pair: pair[1], reverse=True)
         return named[0][0]
 
-    def _throttle(self) -> None:
-        with self._lock:
-            elapsed = time.monotonic() - self._last_request
-            if elapsed < 1.05:
-                time.sleep(1.05 - elapsed)
-            self._last_request = time.monotonic()
+    def _request(self, request: urllib.request.Request, *, retried: bool = False) -> bytes:
+        self._limiter.wait()
+        try:
+            return urlopen_with_retry(request, provider_label="MusicBrainz")
+        except urllib.error.HTTPError as exc:
+            if is_server_error(exc) and not retried:
+                time.sleep(retry_after_seconds(exc))
+                return self._request(request, retried=True)
+            raise MetadataProviderError(f"MusicBrainz недоступен: {exc}") from exc
 
     @staticmethod
     def _escape_query(value: str) -> str:

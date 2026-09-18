@@ -15,6 +15,7 @@ from typing import Any
 
 from djmaker.domain.models import MetadataCandidate, TrackRecord
 from djmaker.plugins.base import MetadataProvider, MetadataProviderError
+from djmaker.plugins.http_utils import retry_after_seconds, urlopen_with_retry
 
 
 class SpotifyProvider(MetadataProvider):
@@ -25,7 +26,6 @@ class SpotifyProvider(MetadataProvider):
     _token_url = "https://accounts.spotify.com/api/token"
     _search_url = "https://api.spotify.com/v1/search"
     _artists_url = "https://api.spotify.com/v1/artists"
-    _connection_retry_delays: tuple[float, ...] = (0.5, 1.5)
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -162,45 +162,26 @@ class SpotifyProvider(MetadataProvider):
             url, headers={"Accept": "application/json", "Authorization": f"Bearer {token}"}
         )
         try:
-            payload = self._urlopen(request)
+            payload = urlopen_with_retry(request, provider_label="Spotify")
         except urllib.error.HTTPError as exc:
             if exc.code == 429 and not retried:
-                delay = self._retry_after(exc)
-                time.sleep(delay)
+                time.sleep(retry_after_seconds(exc))
                 return self._request_json(url, retried=True)
             if exc.code == 401 and not retried:
                 with self._lock:
                     self._token = None
                 return self._request_json(url, retried=True)
             raise MetadataProviderError(f"Spotify недоступен: {exc}") from exc
+        except MetadataProviderError as exc:
+            raise MetadataProviderError(self._connection_error_message(exc.__cause__)) from exc
 
         try:
             return json.loads(payload.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise MetadataProviderError(f"Некорректный ответ Spotify: {exc}") from exc
 
-    def _urlopen(self, request: urllib.request.Request) -> bytes:
-        """Выполняет запрос с повтором при временных сетевых/DNS-сбоях.
-
-        HTTP-ошибки (401/429/...) не повторяются здесь — их обрабатывают вызывающие
-        методы, у которых есть контекст (сброс токена, Retry-After).
-        """
-        last_exc: OSError | None = None
-        for delay in (*self._connection_retry_delays, None):
-            try:
-                with urllib.request.urlopen(request, timeout=15) as response:
-                    return response.read()
-            except urllib.error.HTTPError:
-                raise
-            except (urllib.error.URLError, TimeoutError, OSError) as exc:
-                last_exc = exc
-                if delay is None:
-                    break
-                time.sleep(delay)
-        raise MetadataProviderError(self._connection_error_message(last_exc)) from last_exc
-
     @staticmethod
-    def _connection_error_message(exc: OSError | None) -> str:
+    def _connection_error_message(exc: BaseException | None) -> str:
         reason = getattr(exc, "reason", exc)
         if isinstance(reason, socket.gaierror):
             return (
@@ -209,14 +190,6 @@ class SpotifyProvider(MetadataProvider):
                 f"(исходная ошибка: {exc})."
             )
         return f"Spotify недоступен: {exc}"
-
-    @staticmethod
-    def _retry_after(exc: urllib.error.HTTPError) -> float:
-        header = exc.headers.get("Retry-After") if exc.headers is not None else None
-        try:
-            return max(0.0, float(header)) if header else 1.0
-        except ValueError:
-            return 1.0
 
     def _access_token(self) -> str:
         with self._lock:
@@ -242,11 +215,13 @@ class SpotifyProvider(MetadataProvider):
                 method="POST",
             )
             try:
-                payload = self._urlopen(request)
+                payload = urlopen_with_retry(request, provider_label="Spotify")
             except urllib.error.HTTPError as exc:
                 raise MetadataProviderError(
                     f"Spotify: не удалось получить токен (проверьте Client ID/Secret): {exc}"
                 ) from exc
+            except MetadataProviderError as exc:
+                raise MetadataProviderError(self._connection_error_message(exc.__cause__)) from exc
 
             try:
                 data = json.loads(payload.decode("utf-8"))
