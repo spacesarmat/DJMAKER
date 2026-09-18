@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import urllib.request
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -20,11 +21,12 @@ from djmaker.infrastructure.database import LibraryDatabase
 from djmaker.infrastructure.playlists import PlaylistRepository
 from djmaker.infrastructure.set_timeline import SetTimelineRepository
 from djmaker.plugins.base import MetadataProviderError
+from djmaker.plugins.http_utils import urlopen_with_retry
 from djmaker.plugins.merge import merge_candidates
 from djmaker.plugins.registry import PluginRegistry
 from djmaker.services.audio_analysis import EssentiaAudioAnalyzer
-from djmaker.services.artwork import ArtworkCache
-from djmaker.services.audio_tags import AudioTagService
+from djmaker.services.artwork import ArtworkCache, MAX_ARTWORK_BYTES
+from djmaker.services.audio_tags import AudioTagError, AudioTagService
 from djmaker.services.drop_import import DropImportPlan
 from djmaker.services.organizer import FileOrganizer
 from djmaker.services.scanner import LibraryScanner
@@ -365,7 +367,15 @@ class LibraryService:
         return self.plugins.get(provider_id).search(track, limit=limit)
 
     def apply_candidate(self, track_id: int, candidate: MetadataCandidate) -> TrackRecord:
-        """Применяет найденные метаданные и сохраняет URL обложки."""
+        """Применяет найденные метаданные и встраивает обложку в файл.
+
+        Обложка скачивается по artwork_url и пишется как embedded artwork —
+        так же, как при ручном редактировании тегов — а не только сохраняется
+        ссылкой в БД: иначе обложка видна только внутри DJMAKER (пока доступен
+        интернет и жива ссылка), а в самом файле и в других плеерах её нет.
+        Если скачать/встроить не удалось (сеть, неподходящий формат) —
+        best-effort: теги всё равно применяются, ссылка сохраняется как есть.
+        """
         current = self._require_track(track_id)
         metadata = AudioMetadata(
             title=candidate.title or current.metadata.title,
@@ -379,11 +389,49 @@ class LibraryService:
             bpm=candidate.bpm or current.metadata.bpm,
             musical_key=candidate.musical_key or current.metadata.musical_key,
         )
-        updated = self.update_tags(track_id, metadata)
+
+        artwork: EmbeddedArtwork | None = None
         if candidate.artwork_url:
+            try:
+                artwork = self._download_artwork(candidate.artwork_url)
+            except (MetadataProviderError, AudioTagError) as exc:
+                LOGGER.warning(
+                    "Не удалось подготовить обложку %s: %s", candidate.artwork_url, exc
+                )
+
+        try:
+            updated = self.update_tags(
+                track_id, metadata, replace_artwork=artwork is not None, artwork=artwork
+            )
+        except AudioTagError as exc:
+            if artwork is None:
+                raise
+            # Теги, скорее всего, уже записаны — не даём формату файла,
+            # который не поддерживает embedded artwork (см. write_artwork),
+            # обрушить применение метаданных целиком.
+            LOGGER.warning(
+                "Не удалось встроить обложку в %s, сохраняю только теги: %s",
+                current.path,
+                exc,
+            )
+            artwork = None
+            updated = self.update_tags(track_id, metadata)
+
+        if candidate.artwork_url and artwork is None:
             self.database.set_artwork_url(track_id, candidate.artwork_url)
             updated.artwork_url = candidate.artwork_url
         return updated
+
+    @staticmethod
+    def _download_artwork(url: str) -> EmbeddedArtwork:
+        """Скачивает обложку по URL и проверяет её как embedded artwork."""
+        request = urllib.request.Request(
+            url, headers={"Accept": "image/*", "User-Agent": "DJMAKER metadata search"}
+        )
+        payload = urlopen_with_retry(request, provider_label="Обложка")
+        if len(payload) > MAX_ARTWORK_BYTES:
+            raise AudioTagError(f"Обложка слишком большая: {len(payload)} байт")
+        return AudioTagService.prepare_artwork(payload)
 
     def _require_track(self, track_id: int) -> TrackRecord:
         track = self.database.get_track(track_id)
