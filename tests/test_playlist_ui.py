@@ -17,6 +17,7 @@ from djmaker.infrastructure.set_timeline import SetTimelineRepository
 from djmaker.services.tasks import TaskManager, TaskPaused, TaskStatus
 from djmaker.settings import AppSettings
 from djmaker.ui.app import DJMakerUI
+from djmaker.ui.navigation_cards_controls import NavigationCardsController
 from djmaker.ui.task_progress_controls import TaskProgressController
 
 
@@ -78,6 +79,7 @@ class PlaylistUIFlowTests(unittest.IsolatedAsyncioTestCase):
             setattr(ui, name, {})
         ui.tasks = TaskManager()
         ui.task_progress = TaskProgressController(ui)
+        ui.navigation_cards = NavigationCardsController(ui)
         ui._notify = Mock()
         ui.show_library = Mock()
         ui._refresh_task_indicator = Mock()

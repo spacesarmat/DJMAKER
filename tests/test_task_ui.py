@@ -11,6 +11,9 @@ ANALYZER_SOURCE = PROJECT_ROOT / "src" / "djmaker" / "services" / "audio_analysi
 TASK_PROGRESS_SOURCE = (
     PROJECT_ROOT / "src" / "djmaker" / "ui" / "task_progress_controls.py"
 )
+NAVIGATION_CARDS_SOURCE = (
+    PROJECT_ROOT / "src" / "djmaker" / "ui" / "navigation_cards_controls.py"
+)
 
 
 class TaskUITests(unittest.TestCase):
@@ -26,10 +29,10 @@ class TaskUITests(unittest.TestCase):
         self.assertIn("def _cancel_task", source)
 
     def test_long_operations_are_registered_as_managed_tasks(self) -> None:
-        source = UI_SOURCE.read_text(encoding="utf-8")
         task_progress_source = TASK_PROGRESS_SOURCE.read_text(encoding="utf-8")
+        navigation_cards_source = NAVIGATION_CARDS_SOURCE.read_text(encoding="utf-8")
 
-        self.assertIn("TaskKind.AUDIO_ANALYSIS", source)
+        self.assertIn("TaskKind.AUDIO_ANALYSIS", navigation_cards_source)
         self.assertIn("TaskKind.LIBRARY_SCAN", task_progress_source)
         self.assertIn("TaskKind.ARTWORK_INDEX", task_progress_source)
         self.assertIn("TaskKind.WAVEFORM_ANALYSIS", task_progress_source)

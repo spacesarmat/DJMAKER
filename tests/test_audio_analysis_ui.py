@@ -11,6 +11,9 @@ APP_SOURCE = PROJECT_ROOT / "src" / "djmaker" / "ui" / "app.py"
 TASK_PROGRESS_SOURCE = (
     PROJECT_ROOT / "src" / "djmaker" / "ui" / "task_progress_controls.py"
 )
+NAVIGATION_CARDS_SOURCE = (
+    PROJECT_ROOT / "src" / "djmaker" / "ui" / "navigation_cards_controls.py"
+)
 
 
 class AudioAnalysisUITests(unittest.TestCase):
@@ -23,7 +26,7 @@ class AudioAnalysisUITests(unittest.TestCase):
         self.assertIn("потоков: {parallelism}", source)
 
     def test_full_analysis_screen_reports_grid_progress(self) -> None:
-        source = APP_SOURCE.read_text(encoding="utf-8")
+        source = NAVIGATION_CARDS_SOURCE.read_text(encoding="utf-8")
 
         self.assertIn("beat_grid_counts()", source)
         self.assertIn("Полный анализ: BPM / сетка / Key / Camelot", source)

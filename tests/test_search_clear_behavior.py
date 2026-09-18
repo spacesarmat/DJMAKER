@@ -11,6 +11,7 @@ import flet as ft
 
 from djmaker.settings import AppSettings
 from djmaker.ui.app import DJMakerUI
+from djmaker.ui.navigation_cards_controls import NavigationCardsController
 
 
 class SearchClearBehaviorTests(unittest.IsolatedAsyncioTestCase):
@@ -20,6 +21,7 @@ class SearchClearBehaviorTests(unittest.IsolatedAsyncioTestCase):
         self.ui.search = ft.TextField(value="Artist")
         self.ui.search_clear_button = ft.IconButton(visible=True)
         self.ui.navigation = SimpleNamespace(selected_index=0)
+        self.ui.navigation_cards = NavigationCardsController(self.ui)
         self.ui._search_revision = 0
         self.ui.show_library = Mock()
 

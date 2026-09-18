@@ -58,6 +58,7 @@ from djmaker.settings import (
 from djmaker.ui.density import COMPACT_UI, scaled_library_size
 from djmaker.ui.beat_grid_editor import BeatGridEditorUI
 from djmaker.ui.drop_import_controls import DropImportController
+from djmaker.ui.navigation_cards_controls import NavigationCardsController
 from djmaker.ui.player_controls import PlayerControlsController
 from djmaker.ui.playlists import PlaylistUI
 from djmaker.ui.scrolling import centered_scroll_offset
@@ -269,79 +270,16 @@ class DJMakerUI(BeatGridEditorUI, PlaylistUI):
         self.drop_import = DropImportController(self)
         self.track_selection = TrackSelectionController(self)
         self.task_progress = TaskProgressController(self)
+        self.navigation_cards = NavigationCardsController(self)
 
     def build(self) -> None:
         """Строит главное окно приложения."""
-        self.page.title = "DJMAKER"
-        self.page.padding = 0
-        self.page.spacing = 0
-        self.page.window.min_width = 980
-        self.page.window.min_height = 640
-        apply_app_theme(self.page, self.settings)
-
-        workspace = ft.Column(
-            controls=[
-                ft.Container(
-                    content=self.content,
-                    expand=True,
-                    padding=COMPACT_UI.content_padding,
-                ),
-                self.player_bar,
-                ft.Divider(height=1, color=ft.Colors.OUTLINE_VARIANT),
-                ft.Container(
-                    bgcolor=ft.Colors.SURFACE_CONTAINER_LOW,
-                    padding=ft.Padding.symmetric(
-                        horizontal=COMPACT_UI.status_horizontal_padding,
-                        vertical=COMPACT_UI.status_vertical_padding,
-                    ),
-                    content=ft.Row(
-                        controls=[
-                            ft.Icon(ft.Icons.INFO_OUTLINE, size=12),
-                            self.status,
-                            ft.Container(expand=True),
-                            self.task_button,
-                            self.task_count_text,
-                            self.analysis_progress_text,
-                            self.analysis_progress,
-                        ],
-                        spacing=COMPACT_UI.space_sm,
-                    ),
-                ),
-            ],
-            spacing=0,
-            expand=True,
-        )
-
-        main_row = ft.Row(
-            controls=[
-                self.navigation,
-                ft.VerticalDivider(width=1, color=ft.Colors.OUTLINE_VARIANT),
-                workspace,
-            ],
-            spacing=0,
-            expand=True,
-        )
-        root_content = ft.Stack(
-            controls=[main_row, self._drop_overlay],
-            expand=True,
-        )
-        if self._native_drop_enabled():
-            dropzone = ftd.Dropzone(
-                content=root_content,
-                expand=True,
-                on_dropped=self._on_paths_dropped,
-                on_entered=self._on_drop_entered,
-                on_exited=self._on_drop_exited,
-            )
-            self.page.add(dropzone)
-        else:
-            self.page.add(root_content)
-        self.show_library()
+        self.navigation_cards.build()
 
     @staticmethod
     def _native_drop_enabled() -> bool:
         """Проверяет, запущен ли desktop runtime с собранными extensions."""
-        return ftd is not None and bool(os.getenv("FLET_DART_BRIDGE_PORT"))
+        return NavigationCardsController.native_drop_enabled()
 
     def _build_drop_overlay(self) -> ft.Container:
         """Создаёт полнооконный индикатор активного Drag&Drop."""
@@ -665,10 +603,7 @@ class DJMakerUI(BeatGridEditorUI, PlaylistUI):
             handlers[index]()
 
     def _set_navigation_index(self, index: int) -> None:
-        if self.navigation.selected_index == 6 and index != 6:
-            self._close_theme_editor_session()
-        if self.navigation.selected_index != index:
-            self.navigation.selected_index = index
+        self.navigation_cards.set_navigation_index(index)
 
     def _initial_theme_editor_mode(self) -> str:
         """Выбирает редактируемую схему, соответствующую текущему интерфейсу."""
@@ -687,13 +622,7 @@ class DJMakerUI(BeatGridEditorUI, PlaylistUI):
         self._theme_draft_dark = dict(self.settings.theme_dark_overrides)
 
     def _close_theme_editor_session(self) -> None:
-        if not self._theme_editor_active:
-            return
-        self._theme_editor_active = False
-        self._theme_editor_fields.clear()
-        self._theme_editor_swatches.clear()
-        self._theme_editor_status = None
-        apply_app_theme(self.page, self.settings)
+        self.navigation_cards.close_theme_editor_session()
 
     def _theme_draft_for_mode(self, mode: str | None = None) -> dict[str, str]:
         target = mode or self._theme_editor_mode
@@ -800,13 +729,9 @@ class DJMakerUI(BeatGridEditorUI, PlaylistUI):
         *controls: ft.Control,
         local_update: bool = False,
     ) -> None:
-        del title, subtitle
-        self.content.controls.clear()
-        self.content.controls.extend(controls)
-        if local_update:
-            self.page.update(self.content)
-        else:
-            self.page.update()
+        self.navigation_cards.replace_content(
+            title, subtitle, *controls, local_update=local_update
+        )
 
     @staticmethod
     def _surface_card(
@@ -815,31 +740,10 @@ class DJMakerUI(BeatGridEditorUI, PlaylistUI):
         padding: float = COMPACT_UI.card_padding,
     ) -> ft.Container:
         """Возвращает стандартную карточку для экранов приложения."""
-        return ft.Container(
-            bgcolor=ft.Colors.SURFACE_CONTAINER_LOW,
-            border_radius=COMPACT_UI.radius,
-            padding=padding,
-            content=content,
-        )
+        return NavigationCardsController.surface_card(content, padding=padding)
 
     def _empty_state(self, icon: object, title: str, description: str) -> ft.Control:
-        return self._surface_card(
-            ft.Column(
-                controls=[
-                    ft.Icon(icon, size=24, color=ft.Colors.PRIMARY),
-                    ft.Text(title, size=COMPACT_UI.font_lg, weight=ft.FontWeight.BOLD),
-                    ft.Text(
-                        description,
-                        size=COMPACT_UI.font_sm,
-                        color=ft.Colors.ON_SURFACE_VARIANT,
-                        text_align=ft.TextAlign.CENTER,
-                    ),
-                ],
-                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                spacing=COMPACT_UI.space_sm,
-            ),
-            padding=14,
-        )
+        return self.navigation_cards.empty_state(icon, title, description)
 
     async def _on_search(self, _: object) -> None:
         """Немедленно применяет поисковый запрос по Enter."""
@@ -1549,95 +1453,13 @@ class DJMakerUI(BeatGridEditorUI, PlaylistUI):
 
     def show_folders(self) -> None:
         """Отображает корневые папки и действия сканирования."""
-        self._set_navigation_index(1)
-        try:
-            roots = self.service.roots()
-        except RuntimeError as exc:
-            self._notify(str(exc))
-            return
-
-        drop_message = (
-            "Перетащите в окно DJMAKER файлы или папки — неподдерживаемое "
-            "будет отфильтровано автоматически."
-            if self._native_drop_enabled()
-            else (
-                "Native Drag&Drop доступен в desktop debug/build. "
-                "Обычный python -m djmaker продолжает работать без extension."
-            )
-        )
-        controls: list[ft.Control] = [
-            ft.Row(
-                controls=[
-                    ft.Text(f"Добавлено папок: {len(roots)}", weight=ft.FontWeight.BOLD),
-                    ft.Button(
-                        content="Добавить и сканировать",
-                        icon=ft.Icons.CREATE_NEW_FOLDER_OUTLINED,
-                        on_click=self._pick_and_scan,
-                    ),
-                ],
-                alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-            ),
-            self._surface_card(
-                ft.Row(
-                    controls=[
-                        ft.Icon(
-                            ft.Icons.DRIVE_FOLDER_UPLOAD,
-                            color=ft.Colors.PRIMARY,
-                            size=COMPACT_UI.action_icon_size,
-                        ),
-                        ft.Text(
-                            drop_message,
-                            size=COMPACT_UI.font_xs,
-                            color=ft.Colors.ON_SURFACE_VARIANT,
-                            expand=True,
-                        ),
-                    ],
-                    spacing=COMPACT_UI.space_sm,
-                )
-            ),
-        ]
-        if not roots:
-            controls.append(
-                self._empty_state(
-                    ft.Icons.FOLDER_OUTLINED,
-                    "Нет музыкальных папок",
-                    "Выберите корневую папку с музыкой. DJMAKER проиндексирует поддерживаемые файлы.",
-                )
-            )
-        for root in roots:
-            controls.append(
-                self._surface_card(
-                    ft.Row(
-                        controls=[
-                            ft.Icon(ft.Icons.FOLDER_OUTLINED, color=ft.Colors.PRIMARY),
-                            ft.Column(
-                                controls=[
-                                    ft.Text(root.name or str(root), weight=ft.FontWeight.BOLD),
-                                    ft.Text(str(root), size=COMPACT_UI.font_xs),
-                                ],
-                                expand=True,
-                                spacing=2,
-                            ),
-                            ft.Button(
-                                content="Сканировать",
-                                icon=ft.Icons.REFRESH,
-                                on_click=lambda _, path=root: self._scan_existing(path),
-                            ),
-                        ]
-                    )
-                )
-            )
-        self._replace_content(
-            "Папки",
-            "Источники медиатеки и повторное сканирование",
-            *controls,
-        )
+        self.navigation_cards.show_folders()
 
     async def _pick_and_scan(self, _: object) -> None:
         await self.drop_import.pick_and_scan(_)
 
     def _scan_existing(self, path: Path) -> None:
-        self.page.run_task(self._run_scan, path)
+        self.navigation_cards.scan_existing(path)
 
     async def _run_scan(self, path: Path, task_id: str | None = None) -> None:
         await self.drop_import.run_scan(path, task_id)
@@ -1652,278 +1474,18 @@ class DJMakerUI(BeatGridEditorUI, PlaylistUI):
 
     def show_duplicates(self) -> None:
         """Показывает точные дубликаты по SHA-256."""
-        self._set_navigation_index(2)
-        try:
-            groups = self.service.exact_duplicates()
-        except RuntimeError as exc:
-            self._notify(str(exc))
-            return
-
-        controls: list[ft.Control] = [
-            self._surface_card(
-                ft.Row(
-                    controls=[
-                        ft.Icon(ft.Icons.FINGERPRINT, color=ft.Colors.PRIMARY),
-                        ft.Text(
-                            "Текущий режим находит только файлы с полностью идентичными байтами (SHA-256).",
-                            expand=True,
-                        ),
-                    ]
-                )
-            )
-        ]
-        if not groups:
-            controls.append(
-                self._empty_state(
-                    ft.Icons.CONTENT_COPY_OUTLINED,
-                    "Точные дубликаты не найдены",
-                    "Второй уровень сравнения по аудио-fingerprint будет добавлен отдельным модулем.",
-                )
-            )
-        for index, group in enumerate(groups, start=1):
-            total_size = sum(track.size for track in group.tracks)
-            rows: list[ft.Control] = [
-                ft.Text(
-                    f"Группа {index} · {len(group.tracks)} файлов · {self._format_size(total_size)}",
-                    weight=ft.FontWeight.BOLD,
-                ),
-                ft.Text(f"SHA-256: {group.file_hash}", size=COMPACT_UI.font_micro),
-            ]
-            rows.extend(ft.Text(f"• {track.path}", size=COMPACT_UI.font_xs) for track in group.tracks)
-            controls.append(self._surface_card(ft.Column(controls=rows, spacing=5)))
-
-        self._replace_content(
-            "Дубликаты",
-            "Поиск идентичных файлов в медиатеке",
-            *controls,
-        )
+        self.navigation_cards.show_duplicates()
 
     def show_plugins(self) -> None:
         """Показывает подключённые внешние провайдеры."""
-        self._set_navigation_index(3)
-        providers = self.service.plugins.all()
-        controls: list[ft.Control] = [
-            self._surface_card(
-                ft.Text(
-                    "Каждый внешний каталог или DJ-пул подключается отдельным плагином. "
-                    "Ядро медиатеки от конкретного сервиса не зависит."
-                )
-            )
-        ]
-        for provider in providers:
-            controls.append(
-                self._surface_card(
-                    ft.Row(
-                        controls=[
-                            ft.Icon(ft.Icons.CHECK_CIRCLE, color=ft.Colors.PRIMARY),
-                            ft.Column(
-                                controls=[
-                                    ft.Text(provider.display_name, weight=ft.FontWeight.BOLD),
-                                    ft.Text(provider.provider_id, size=COMPACT_UI.font_xs),
-                                ],
-                                expand=True,
-                                spacing=1,
-                            ),
-                            ft.Text("Подключён", size=COMPACT_UI.font_xs),
-                        ]
-                    )
-                )
-            )
-        if not providers:
-            controls.append(
-                self._empty_state(
-                    ft.Icons.CLOUD_OFF_OUTLINED,
-                    "Нет подключённых провайдеров",
-                    "Онлайн-каталоги появятся здесь после подключения плагинов.",
-                )
-            )
-        self._replace_content(
-            "Онлайн-метаданные",
-            "Плагины музыкальных каталогов и DJ-пулов",
-            *controls,
-        )
+        self.navigation_cards.show_plugins()
 
     def show_audio_modules(self) -> None:
         """Показывает доступные DSP-модули и управление анализом."""
-        self._set_navigation_index(4)
-        try:
-            total, analyzed = self.service.analysis_counts()
-            grid_total, grid_analyzed = self.service.beat_grid_counts()
-            waveform_total, waveform_analyzed = self.service.waveform_counts()
-        except RuntimeError as exc:
-            self._notify(str(exc))
-            return
-
-        pending = max(0, total - analyzed)
-        grid_pending = max(0, grid_total - grid_analyzed)
-        waveform_pending = max(0, waveform_total - waveform_analyzed)
-        analysis_card = self._surface_card(
-            ft.Column(
-                controls=[
-                    ft.Row(
-                        controls=[
-                            ft.Icon(ft.Icons.SPEED, size=18, color=ft.Colors.PRIMARY),
-                            ft.Column(
-                                controls=[
-                                    ft.Text(
-                                        "Полный анализ: BPM / сетка / Key / Camelot",
-                                        weight=ft.FontWeight.BOLD,
-                                    ),
-                                    ft.Text(
-                                        "FFmpeg → mono 44.1 kHz float32 → DJMAKER Essentia "
-                                        "· параллельный worker-пул",
-                                        size=COMPACT_UI.font_xs,
-                                        color=ft.Colors.ON_SURFACE_VARIANT,
-                                    ),
-                                ],
-                                expand=True,
-                                spacing=2,
-                            ),
-                            ft.Text(
-                                f"BPM/Key: {analyzed}/{total} · "
-                                f"сетка: {grid_analyzed}/{grid_total} · "
-                                f"в очереди: {max(pending, grid_pending)}",
-                                size=COMPACT_UI.font_xs,
-                            ),
-                        ]
-                    ),
-                    ft.Row(
-                        controls=[
-                            ft.Button(
-                                content="Анализировать новые",
-                                icon=ft.Icons.SPEED,
-                                on_click=self._start_audio_analysis,
-                            ),
-                            ft.Button(
-                                content="Пересчитать всё",
-                                icon=ft.Icons.REFRESH,
-                                on_click=lambda event: self._start_audio_analysis(
-                                    event,
-                                    force=True,
-                                ),
-                            ),
-                        ],
-                        spacing=COMPACT_UI.space_sm,
-                    ),
-                    ft.Text(
-                        "Результат хранится отдельно от тегов: точный BPM, все "
-                        "обнаруженные доли, первая сильная доля, стабильность темпа, "
-                        "тональность, лад, Camelot и confidence Essentia.",
-                        size=COMPACT_UI.font_xs,
-                        color=ft.Colors.ON_SURFACE_VARIANT,
-                    ),
-                ],
-                spacing=COMPACT_UI.space_sm,
-            )
-        )
-
-        waveform_card = self._surface_card(
-            ft.Column(
-                controls=[
-                    ft.Row(
-                        controls=[
-                            ft.Icon(
-                                ft.Icons.GRAPHIC_EQ,
-                                size=18,
-                                color=ft.Colors.PRIMARY,
-                            ),
-                            ft.Column(
-                                controls=[
-                                    ft.Text("Waveform", weight=ft.FontWeight.BOLD),
-                                    ft.Text(
-                                        "FFmpeg → mono PCM → 60 нормализованных вертикальных полос",
-                                        size=COMPACT_UI.font_xs,
-                                        color=ft.Colors.ON_SURFACE_VARIANT,
-                                    ),
-                                ],
-                                expand=True,
-                                spacing=2,
-                            ),
-                            ft.Text(
-                                f"Готово: {waveform_analyzed}/{waveform_total} · "
-                                f"в очереди: {waveform_pending}",
-                                size=COMPACT_UI.font_xs,
-                            ),
-                        ]
-                    ),
-                    ft.Row(
-                        controls=[
-                            ft.Button(
-                                content="Построить новые",
-                                icon=ft.Icons.GRAPHIC_EQ,
-                                on_click=self._start_waveform_analysis,
-                            ),
-                            ft.Button(
-                                content="Перестроить всё",
-                                icon=ft.Icons.REFRESH,
-                                on_click=lambda event: self._start_waveform_analysis(
-                                    event,
-                                    force=True,
-                                ),
-                            ),
-                        ],
-                        spacing=COMPACT_UI.space_sm,
-                    ),
-                ],
-                spacing=COMPACT_UI.space_sm,
-            )
-        )
-
-        planned = (
-            (
-                ft.Icons.VOLUME_UP_OUTLINED,
-                "Нормализация",
-                f"Отдельный этап · основной target {DEFAULT_TARGET_LUFS} LUFS",
-            ),
-            (
-                ft.Icons.FINGERPRINT,
-                "Audio fingerprint",
-                "Второй уровень поиска музыкальных дубликатов",
-            ),
-        )
-        controls: list[ft.Control] = [analysis_card, waveform_card]
-        controls.extend(
-            self._surface_card(
-                ft.Row(
-                    controls=[
-                        ft.Icon(icon, size=18, color=ft.Colors.PRIMARY),
-                        ft.Column(
-                            controls=[
-                                ft.Text(title, weight=ft.FontWeight.BOLD),
-                                ft.Text(description, size=COMPACT_UI.font_xs),
-                            ],
-                            expand=True,
-                            spacing=2,
-                        ),
-                        ft.Text("Запланировано", size=COMPACT_UI.font_xs),
-                    ]
-                )
-            )
-            for icon, title, description in planned
-        )
-        self._replace_content(
-            "Аудио-модули",
-            "Независимые этапы анализа и обработки аудио",
-            *controls,
-        )
+        self.navigation_cards.show_audio_modules()
 
     def _start_audio_analysis(self, _: object, *, force: bool = False) -> None:
-        existing = self.tasks.active_for_kind(TaskKind.AUDIO_ANALYSIS)
-        if existing is not None:
-            self._notify(
-                "Полный аудио-анализ уже выполняется или остановлен. "
-                "Откройте «Задачи» для управления."
-            )
-            return
-
-        task = self.tasks.create(
-            kind=TaskKind.AUDIO_ANALYSIS,
-            title="Полный анализ BPM / сетка / Key",
-            detail="Подготовка FFmpeg и Essentia...",
-        )
-        self._audio_task_contexts[task.id] = _AudioTaskContext(force=force)
-        self._refresh_task_indicator()
-        self.page.run_task(self._run_audio_analysis, task.id)
+        self.navigation_cards.start_audio_analysis(_, force=force)
 
     async def _run_audio_analysis(self, task_id: str) -> None:
         await self.task_progress.run_audio_analysis(task_id)
@@ -3064,9 +2626,4 @@ class DJMakerUI(BeatGridEditorUI, PlaylistUI):
 
     @staticmethod
     def _format_size(size: int) -> str:
-        value = float(size)
-        for unit in ("B", "KB", "MB", "GB", "TB"):
-            if value < 1024 or unit == "TB":
-                return f"{value:.1f} {unit}"
-            value /= 1024
-        return f"{value:.1f} TB"
+        return NavigationCardsController.format_size(size)
