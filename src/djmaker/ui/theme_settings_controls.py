@@ -581,11 +581,14 @@ class ThemeSettingsController:
             )
         )
 
+        metadata_sources = self.metadata_sources_card()
+
         settings_list = ft.ListView(
             controls=[
                 self.runtime_card(app.runtime_report),
                 appearance,
                 theme_editor,
+                metadata_sources,
                 storage,
                 organizer,
             ],
@@ -598,6 +601,149 @@ class ThemeSettingsController:
             f"Тема: {THEME_MODE_LABELS[app.settings.theme_mode]} · {palette_title(app.settings.theme_palette)}",
             settings_list,
         )
+
+    def metadata_sources_card(self) -> ft.Control:
+        app = self.app
+        selected = set(app.settings.metadata_providers)
+
+        rows: list[ft.Control] = []
+        for provider in app.service.plugins.all():
+            row_controls: list[ft.Control] = [
+                ft.Checkbox(
+                    label=provider.display_name,
+                    value=provider.provider_id in selected,
+                    on_change=lambda e, pid=provider.provider_id: self.on_metadata_provider_toggled(e, pid),
+                )
+            ]
+            is_configured = getattr(provider, "is_configured", None)
+            if callable(is_configured):
+                if not is_configured():
+                    row_controls.append(
+                        ft.Text(
+                            "не настроен",
+                            size=COMPACT_UI.font_micro,
+                            color=ft.Colors.ERROR,
+                        )
+                    )
+                row_controls.append(ft.Container(expand=True))
+                row_controls.append(
+                    ft.Button(
+                        content="Настроить",
+                        icon=ft.Icons.SETTINGS_OUTLINED,
+                        on_click=lambda _, pid=provider.provider_id: self.open_provider_configuration_dialog(pid),
+                    )
+                )
+            rows.append(ft.Row(controls=row_controls, vertical_alignment=ft.CrossAxisAlignment.CENTER))
+
+        return app._surface_card(
+            ft.Column(
+                controls=[
+                    ft.Row(
+                        controls=[
+                            ft.Icon(ft.Icons.TRAVEL_EXPLORE, color=ft.Colors.PRIMARY),
+                            ft.Text("Источники метаданных", size=COMPACT_UI.font_lg, weight=ft.FontWeight.BOLD),
+                        ]
+                    ),
+                    ft.Text(
+                        "Выбранные источники опрашиваются при поиске онлайн-метаданных; "
+                        "результаты объединяются, недостающие поля у одного заполняются "
+                        "данными другого.",
+                        size=COMPACT_UI.font_xs,
+                    ),
+                    *rows,
+                ],
+                spacing=5,
+            )
+        )
+
+    def on_metadata_provider_toggled(self, event: object, provider_id: str) -> None:
+        app = self.app
+        control = getattr(event, "control", None)
+        checked = bool(getattr(control, "value", False))
+        current = list(app.settings.metadata_providers)
+        if checked and provider_id not in current:
+            current.append(provider_id)
+        elif not checked and provider_id in current:
+            current.remove(provider_id)
+        self.save_and_apply_settings(replace(app.settings, metadata_providers=tuple(current)))
+
+    def open_provider_configuration_dialog(self, provider_id: str) -> None:
+        if provider_id == "spotify":
+            self.open_spotify_configuration_dialog()
+
+    def open_spotify_configuration_dialog(self) -> None:
+        app = self.app
+        client_id_field = ft.TextField(
+            label="Client ID",
+            value=app.settings.spotify_client_id,
+            dense=True,
+        )
+        client_secret_field = ft.TextField(
+            label="Client Secret",
+            value=app.settings.spotify_client_secret,
+            dense=True,
+            password=True,
+            can_reveal_password=True,
+        )
+
+        def save(_: object) -> None:
+            client_id = (client_id_field.value or "").strip()
+            client_secret = (client_secret_field.value or "").strip()
+            self.save_and_apply_settings(
+                replace(
+                    app.settings,
+                    spotify_client_id=client_id,
+                    spotify_client_secret=client_secret,
+                )
+            )
+            provider = app.service.plugins.get("spotify")
+            configure = getattr(provider, "configure", None)
+            if callable(configure):
+                configure(client_id, client_secret)
+            app.page.pop_dialog()
+            app._notify(
+                "Spotify настроен" if client_id and client_secret else "Spotify credentials очищены"
+            )
+
+        dialog = ft.AlertDialog(
+            modal=True,
+            title=ft.Text("Настройка Spotify"),
+            content=ft.Column(
+                controls=[
+                    ft.Text(
+                        "Бесплатные Client ID и Client Secret нужны для поиска метаданных "
+                        "и обложек в Spotify:",
+                        size=COMPACT_UI.font_xs,
+                    ),
+                    ft.Text(
+                        "1. Откройте developer.spotify.com/dashboard и войдите со своим "
+                        "аккаунтом Spotify.\n"
+                        "2. Create app — укажите любое имя и Redirect URI, например "
+                        "http://127.0.0.1:9090 (Spotify требует его в форме, даже если вход "
+                        "пользователя здесь не используется).\n"
+                        "3. Откройте Settings созданного приложения и скопируйте Client ID "
+                        "и Client Secret.",
+                        size=COMPACT_UI.font_xs,
+                        color=ft.Colors.ON_SURFACE_VARIANT,
+                    ),
+                    client_id_field,
+                    client_secret_field,
+                    ft.Text(
+                        "Хранится локально в settings.json на этом устройстве.",
+                        size=COMPACT_UI.font_micro,
+                        color=ft.Colors.ON_SURFACE_VARIANT,
+                    ),
+                ],
+                tight=True,
+                spacing=8,
+                width=420,
+            ),
+            actions=[
+                ft.Button(content="Отмена", on_click=lambda _: app.page.pop_dialog()),
+                ft.Button(content="Сохранить", icon=ft.Icons.SAVE_OUTLINED, on_click=save),
+            ],
+        )
+        app.page.show_dialog(dialog)
 
     def on_theme_mode_selected(self, event: object) -> None:
         app = self.app

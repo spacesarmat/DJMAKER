@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import logging
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from djmaker.domain.models import (
@@ -17,6 +18,8 @@ from djmaker.infrastructure.beat_grid import BeatGridRepository
 from djmaker.infrastructure.database import LibraryDatabase
 from djmaker.infrastructure.playlists import PlaylistRepository
 from djmaker.infrastructure.set_timeline import SetTimelineRepository
+from djmaker.plugins.base import MetadataProviderError
+from djmaker.plugins.merge import merge_candidates
 from djmaker.plugins.registry import PluginRegistry
 from djmaker.services.audio_analysis import EssentiaAudioAnalyzer
 from djmaker.services.artwork import ArtworkCache
@@ -26,6 +29,9 @@ from djmaker.services.organizer import FileOrganizer
 from djmaker.services.scanner import LibraryScanner
 from djmaker.services.tasks import TaskControl
 from djmaker.services.waveform import WAVEFORM_BAR_COUNT, WaveformAnalyzer
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 class LibraryServiceError(RuntimeError):
@@ -306,12 +312,29 @@ class LibraryService:
     def search_metadata(
         self,
         track_id: int,
-        provider_id: str = "musicbrainz",
+        provider_ids: Sequence[str] = ("musicbrainz",),
         limit: int = 10,
     ) -> list[MetadataCandidate]:
-        """Ищет метаданные трека через выбранный внешний плагин."""
+        """Ищет метаданные трека через один или несколько внешних плагинов.
+
+        Провайдер, вернувший ошибку, пропускается (best-effort): остальные
+        результаты всё равно возвращаются. Исключение поднимается, только
+        если не сработал ни один из запрошенных провайдеров.
+        """
         track = self._require_track(track_id)
-        return self.plugins.get(provider_id).search(track, limit=limit)
+        per_provider: list[list[MetadataCandidate]] = []
+        errors: list[str] = []
+        for provider_id in provider_ids:
+            try:
+                provider = self.plugins.get(provider_id)
+                per_provider.append(provider.search(track, limit=limit))
+            except (MetadataProviderError, KeyError) as exc:
+                LOGGER.warning("Провайдер метаданных %s недоступен: %s", provider_id, exc)
+                errors.append(f"{provider_id}: {exc}")
+
+        if not per_provider and errors:
+            raise LibraryServiceError("; ".join(errors))
+        return merge_candidates(per_provider)
 
     def apply_candidate(self, track_id: int, candidate: MetadataCandidate) -> TrackRecord:
         """Применяет найденные метаданные и сохраняет URL обложки."""
@@ -321,7 +344,7 @@ class LibraryService:
             artist=candidate.artist or current.metadata.artist,
             album=candidate.album or current.metadata.album,
             album_artist=current.metadata.album_artist,
-            genre=current.metadata.genre,
+            genre=candidate.genre or current.metadata.genre,
             year=candidate.year or current.metadata.year,
             track_number=current.metadata.track_number,
             disc_number=current.metadata.disc_number,

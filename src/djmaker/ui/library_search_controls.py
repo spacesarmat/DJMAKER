@@ -16,8 +16,9 @@ import flet_audio as fta
 
 from djmaker.config import DEFAULT_ORGANIZE_TEMPLATE
 from djmaker.domain.library_sort import LIBRARY_SORT_LABELS
-from djmaker.domain.models import AudioMetadata, EmbeddedArtwork, MetadataCandidate
+from djmaker.domain.models import AudioMetadata, EmbeddedArtwork, MetadataCandidate, TrackRecord
 from djmaker.plugins.base import MetadataProviderError
+from djmaker.services.library import LibraryServiceError
 from djmaker.settings import LIBRARY_SCALE_MAX, LIBRARY_SCALE_MIN, LIBRARY_SCALE_STEP
 from djmaker.ui.density import COMPACT_UI
 
@@ -780,6 +781,7 @@ class LibrarySearchController:
 
             app._set_busy(True, "Сохранение тегов...")
             try:
+                await app.player.release_if_current(track_id)
                 await app.workers.run(
                     app.service.update_tags,
                     track_id,
@@ -789,7 +791,7 @@ class LibrarySearchController:
                 )
             except Exception as exc:
                 LOGGER.exception("Ошибка сохранения тегов")
-                app._notify(f"Не удалось сохранить теги: {exc}")
+                app._notify(self.tag_write_error_message(exc))
             else:
                 app.page.pop_dialog()
                 app._notify("Теги сохранены")
@@ -962,22 +964,38 @@ class LibrarySearchController:
 
     async def metadata_search(self, track_id: int) -> None:
         app = self.app
-        app._set_busy(True, "Поиск в MusicBrainz...")
+        provider_ids = app.settings.metadata_providers
+        if not provider_ids:
+            app._notify("Не выбрано ни одного источника метаданных (Настройки → Источники метаданных)")
+            return
+
+        names = " + ".join(
+            provider.display_name
+            for provider in app.service.plugins.all()
+            if provider.provider_id in provider_ids
+        )
+        app._set_busy(True, f"Поиск метаданных ({names})...")
         try:
-            candidates = await app.workers.run(app.service.search_metadata, track_id, "musicbrainz", 8)
-        except (MetadataProviderError, RuntimeError, OSError) as exc:
+            candidates = await app.workers.run(
+                app.service.search_metadata, track_id, provider_ids, 8
+            )
+        except (MetadataProviderError, LibraryServiceError, RuntimeError, OSError) as exc:
             LOGGER.exception("Ошибка онлайн-поиска")
             app._notify(f"Ошибка поиска метаданных: {exc}")
         else:
-            self.open_candidates(track_id, candidates)
+            self.open_candidates(track_id, candidates, names)
         finally:
             app._set_busy(False)
 
-    def open_candidates(self, track_id: int, candidates: list[MetadataCandidate]) -> None:
+    def open_candidates(
+        self, track_id: int, candidates: list[MetadataCandidate], source_names: str
+    ) -> None:
         app = self.app
         if not candidates:
-            app._notify("MusicBrainz не нашёл подходящих вариантов")
+            app._notify(f"{source_names}: подходящих вариантов не найдено")
             return
+
+        current = app.service.database.get_track(track_id)
 
         rows: list[ft.Control] = []
         dialog: ft.AlertDialog
@@ -986,10 +1004,11 @@ class LibrarySearchController:
             async def apply(_: object, value: MetadataCandidate = candidate) -> None:
                 app._set_busy(True, "Применение метаданных...")
                 try:
+                    await app.player.release_if_current(track_id)
                     await app.workers.run(app.service.apply_candidate, track_id, value)
                 except Exception as exc:
                     LOGGER.exception("Ошибка применения онлайн-метаданных")
-                    app._notify(f"Не удалось применить метаданные: {exc}")
+                    app._notify(self.tag_write_error_message(exc))
                 else:
                     app.page.pop_dialog()
                     app._notify("Метаданные применены")
@@ -997,31 +1016,127 @@ class LibrarySearchController:
                 finally:
                     app._set_busy(False)
 
-            rows.append(
-                app._surface_card(
-                    ft.Row(
-                        controls=[
-                            ft.Column(
-                                controls=[
-                                    ft.Text(candidate.title, weight=ft.FontWeight.BOLD),
-                                    ft.Text(f"{candidate.artist} · {candidate.album} · {candidate.year}"),
-                                ],
-                                expand=True,
-                            ),
-                            ft.Button(content="Применить", on_click=apply),
-                        ]
-                    ),
-                    padding=5,
+            content: list[ft.Control] = [
+                ft.Row(
+                    controls=[
+                        ft.Image(
+                            src=candidate.artwork_url,
+                            width=48,
+                            height=48,
+                            fit=ft.BoxFit.COVER,
+                            border_radius=4,
+                        )
+                        if candidate.artwork_url
+                        else ft.Container(width=48, height=48),
+                        ft.Column(
+                            controls=[
+                                ft.Text(candidate.title, weight=ft.FontWeight.BOLD),
+                                ft.Text(
+                                    candidate.provider_id.replace("+", " + "),
+                                    size=COMPACT_UI.font_micro,
+                                    color=ft.Colors.ON_SURFACE_VARIANT,
+                                ),
+                            ],
+                            spacing=0,
+                            expand=True,
+                        ),
+                        ft.Button(content="Применить", on_click=apply),
+                    ],
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
                 )
-            )
+            ]
+            content.extend(self.candidate_diff_rows(current, candidate))
+
+            rows.append(app._surface_card(ft.Column(controls=content, spacing=4), padding=5))
 
         dialog = ft.AlertDialog(
             modal=True,
-            title=ft.Text("Результаты MusicBrainz"),
+            title=ft.Text(f"Результаты: {source_names}"),
             content=ft.Column(controls=rows, scroll=ft.ScrollMode.AUTO, height=500, width=760),
             actions=[ft.Button(content="Закрыть", on_click=lambda _: app.page.pop_dialog())],
         )
         app.page.show_dialog(dialog)
+
+    @staticmethod
+    def tag_write_error_message(exc: Exception) -> str:
+        text = str(exc)
+        if "Permission denied" in text or "Errno 13" in text:
+            return (
+                "Не удалось сохранить: файл занят другой программой (например, "
+                "плеером) или доступен только для чтения. Остановите воспроизведение "
+                f"этого трека и/или снимите атрибут «только чтение», затем повторите. ({exc})"
+            )
+        return f"Не удалось сохранить: {exc}"
+
+    @staticmethod
+    def candidate_diff_rows(
+        current: TrackRecord | None, candidate: MetadataCandidate
+    ) -> list[ft.Control]:
+        """Полная карточка сравнения: все поля из файла, заменяемые — с before→after."""
+        if current is None:
+            return []
+
+        def text(value: object) -> str:
+            if value is None or value == "":
+                return "—"
+            return str(value)
+
+        comparable = [
+            ("Название", current.metadata.title, candidate.title),
+            ("Исполнитель", current.metadata.artist, candidate.artist),
+            ("Альбом", current.metadata.album, candidate.album),
+            ("Год", current.metadata.year, candidate.year),
+            ("Жанр", current.metadata.genre, candidate.genre),
+        ]
+        unchanged_only = [
+            ("Альбом-исполнитель", current.metadata.album_artist),
+            ("Трек №", current.metadata.track_number),
+            ("Диск №", current.metadata.disc_number),
+            ("BPM", current.metadata.bpm),
+            ("Тональность", current.metadata.musical_key),
+        ]
+
+        rows: list[ft.Control] = []
+        for label, before, after in comparable:
+            will_change = bool(after) and after != before
+            rows.append(
+                LibrarySearchController._field_row(
+                    label, text(before), text(after) if will_change else None
+                )
+            )
+        for label, value in unchanged_only:
+            rows.append(LibrarySearchController._field_row(label, text(value), None))
+        return rows
+
+    @staticmethod
+    def _field_row(label: str, before: str, after: str | None) -> ft.Control:
+        if after is None:
+            return ft.Row(
+                controls=[
+                    ft.Text(
+                        f"{label}:",
+                        size=COMPACT_UI.font_micro,
+                        color=ft.Colors.ON_SURFACE_VARIANT,
+                        width=110,
+                    ),
+                    ft.Text(before, size=COMPACT_UI.font_micro),
+                ],
+                spacing=6,
+            )
+        return ft.Row(
+            controls=[
+                ft.Text(f"{label}:", size=COMPACT_UI.font_micro, width=110),
+                ft.Text(
+                    before,
+                    size=COMPACT_UI.font_micro,
+                    color=ft.Colors.ON_SURFACE_VARIANT,
+                    style=ft.TextStyle(decoration=ft.TextDecoration.LINE_THROUGH),
+                ),
+                ft.Icon(ft.Icons.ARROW_FORWARD, size=COMPACT_UI.font_micro),
+                ft.Text(after, size=COMPACT_UI.font_micro, weight=ft.FontWeight.BOLD),
+            ],
+            spacing=6,
+        )
 
     @staticmethod
     def parse_int(value: str | None) -> int | None:

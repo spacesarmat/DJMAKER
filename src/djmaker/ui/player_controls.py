@@ -129,6 +129,29 @@ class PlayerControlsController:
             waveform_updates.append(current_waveform)
         return waveform_updates
 
+    async def release_if_current(self, track_id: int) -> None:
+        """Отпускает файловый хендл плеера перед записью тегов в тот же файл.
+
+        На Windows нативный backend flet_audio держит файл открытым даже на
+        паузе, из-за чего mutagen получает PermissionError при записи тегов.
+        release() освобождает ресурс; при следующем resume()/смене источника
+        плеер откроет файл заново.
+        """
+        app = self.app
+        if app.audio is None or app._player_track_id != track_id:
+            return
+        try:
+            await app.audio.pause()
+            await app.audio.release()
+        except Exception:
+            LOGGER.debug(
+                "Не удалось освободить аудио-ресурс перед записью тегов", exc_info=True
+            )
+            return
+        app._player_state = fta.AudioState.STOPPED
+        self.refresh_player_controls()
+        app.page.update(app.player_play_button)
+
     async def stop_player(self, _: object) -> None:
         app = self.app
         if app.audio is None:

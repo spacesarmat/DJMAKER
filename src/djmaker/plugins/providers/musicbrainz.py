@@ -36,7 +36,12 @@ class MusicBrainzProvider(MetadataProvider):
             query_parts.append(f'artist:"{self._escape_query(artist)}"')
         query = " AND ".join(query_parts)
         params = urllib.parse.urlencode(
-            {"query": query, "fmt": "json", "limit": max(1, min(limit, 25))}
+            {
+                "query": query,
+                "fmt": "json",
+                "limit": max(1, min(limit, 25)),
+                "inc": "tags",
+            }
         )
         url = f"{self._base_url}?{params}"
 
@@ -101,7 +106,22 @@ class MusicBrainzProvider(MetadataProvider):
             year=year,
             release_id=release_id,
             artwork_url=artwork_url,
+            genre=self._top_tag(item.get("tags")),
         )
+
+    @staticmethod
+    def _top_tag(tags: Any) -> str:
+        if not isinstance(tags, list):
+            return ""
+        named = [
+            (str(tag.get("name") or ""), int(tag.get("count") or 0))
+            for tag in tags
+            if isinstance(tag, dict) and tag.get("name")
+        ]
+        if not named:
+            return ""
+        named.sort(key=lambda pair: pair[1], reverse=True)
+        return named[0][0]
 
     def _throttle(self) -> None:
         with self._lock:

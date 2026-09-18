@@ -29,6 +29,9 @@ THEME_PALETTES = (
 DEFAULT_THEME_MODE = "system"
 DEFAULT_THEME_PALETTE = "djmaker_blue"
 
+KNOWN_METADATA_PROVIDERS = ("musicbrainz", "spotify")
+DEFAULT_METADATA_PROVIDERS: tuple[str, ...] = ("musicbrainz",)
+
 LIBRARY_SCALE_MIN = 70
 LIBRARY_SCALE_MAX = 150
 LIBRARY_SCALE_STEP = 10
@@ -83,6 +86,9 @@ class AppSettings:
 
     library_sort: str = DEFAULT_LIBRARY_SORT
     library_sort_descending: bool = False
+    metadata_providers: tuple[str, ...] = DEFAULT_METADATA_PROVIDERS
+    spotify_client_id: str = ""
+    spotify_client_secret: str = ""
 
     @classmethod
     def from_mapping(cls, data: dict[str, Any]) -> "AppSettings":
@@ -116,6 +122,23 @@ class AppSettings:
         if not isinstance(descending, bool):
             descending = False
 
+        raw_providers = data.get("metadata_providers")
+        if isinstance(raw_providers, list):
+            providers = tuple(
+                dict.fromkeys(p for p in raw_providers if p in KNOWN_METADATA_PROVIDERS)
+            )
+        else:
+            providers = ()
+        if not providers:
+            providers = DEFAULT_METADATA_PROVIDERS
+
+        spotify_client_id = data.get("spotify_client_id", "")
+        if not isinstance(spotify_client_id, str):
+            spotify_client_id = ""
+        spotify_client_secret = data.get("spotify_client_secret", "")
+        if not isinstance(spotify_client_secret, str):
+            spotify_client_secret = ""
+
         return cls(
             theme_mode=mode,
             theme_palette=palette,
@@ -128,6 +151,9 @@ class AppSettings:
             library_scale_percent=scale,
             library_sort=sort,
             library_sort_descending=descending,
+            metadata_providers=providers,
+            spotify_client_id=spotify_client_id.strip(),
+            spotify_client_secret=spotify_client_secret.strip(),
         )
 
 

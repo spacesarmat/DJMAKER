@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from djmaker.plugins.base import MetadataProvider
 from djmaker.plugins.providers.musicbrainz import MusicBrainzProvider
+from djmaker.plugins.providers.spotify import SpotifyProvider
 
 
 class PluginRegistry:
@@ -12,6 +13,7 @@ class PluginRegistry:
     def __init__(self) -> None:
         self._providers: dict[str, MetadataProvider] = {}
         self.register(MusicBrainzProvider())
+        self.register(SpotifyProvider())
 
     def register(self, provider: MetadataProvider) -> None:
         """Регистрирует провайдер, не позволяя случайно заменить существующий."""

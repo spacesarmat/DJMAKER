@@ -139,3 +139,4 @@ class MetadataCandidate:
     year: str = ""
     release_id: str = ""
     artwork_url: str = ""
+    genre: str = ""

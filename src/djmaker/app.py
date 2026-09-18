@@ -51,6 +51,10 @@ async def flet_main(page: ft.Page) -> None:
     tasks = TaskManager()
     settings_store = SettingsStore(paths.settings_file)
     settings = settings_store.load()
+    for provider in plugins.all():
+        configure = getattr(provider, "configure", None)
+        if callable(configure) and provider.provider_id == "spotify":
+            configure(settings.spotify_client_id, settings.spotify_client_secret)
 
     ui = DJMakerUI(
         page,
