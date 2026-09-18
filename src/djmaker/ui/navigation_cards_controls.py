@@ -317,35 +317,7 @@ class NavigationCardsController:
         app = self.app
         self.set_navigation_index(3)
         providers = app.service.plugins.all()
-        controls: list[ft.Control] = [
-            self.surface_card(
-                ft.Text(
-                    "Каждый внешний каталог или DJ-пул подключается отдельным плагином. "
-                    "Ядро медиатеки от конкретного сервиса не зависит."
-                )
-            ),
-            self.bulk_metadata_search_card(),
-            self.metadata_review_card(),
-        ]
-        for provider in providers:
-            controls.append(
-                self.surface_card(
-                    ft.Row(
-                        controls=[
-                            ft.Icon(ft.Icons.CHECK_CIRCLE, color=ft.Colors.PRIMARY),
-                            ft.Column(
-                                controls=[
-                                    ft.Text(provider.display_name, weight=ft.FontWeight.BOLD),
-                                    ft.Text(provider.provider_id, size=COMPACT_UI.font_xs),
-                                ],
-                                expand=True,
-                                spacing=1,
-                            ),
-                            ft.Text("Подключён", size=COMPACT_UI.font_xs),
-                        ]
-                    )
-                )
-            )
+        controls: list[ft.Control] = [self.provider_status_row()]
         if not providers:
             controls.append(
                 self.empty_state(
@@ -354,10 +326,78 @@ class NavigationCardsController:
                     "Онлайн-каталоги появятся здесь после подключения плагинов.",
                 )
             )
+        controls.append(self.bulk_metadata_search_card())
+        controls.append(self.metadata_review_card())
+        listing = ft.ListView(
+            controls=controls,
+            expand=True,
+            spacing=COMPACT_UI.space_md,
+            padding=0,
+        )
         self.replace_content(
             "Онлайн-метаданные",
             "Плагины музыкальных каталогов и DJ-пулов",
-            *controls,
+            listing,
+        )
+
+    def provider_status_row(self) -> ft.Control:
+        """Компактная строка-статус источников: клик включает/выключает или
+        открывает настройку, если провайдер требует credentials."""
+        app = self.app
+        selected = set(app.settings.metadata_providers)
+
+        chips: list[ft.Control] = []
+        for provider in app.service.plugins.all():
+            is_configured = getattr(provider, "is_configured", None)
+            needs_config = callable(is_configured)
+            configured = not needs_config or is_configured()
+            active = configured and provider.provider_id in selected
+
+            if configured:
+                on_click = lambda _, pid=provider.provider_id: (
+                    app.theme_settings.toggle_metadata_provider(pid)
+                )
+                tooltip = (
+                    f"{provider.display_name}: активен — нажмите, чтобы выключить"
+                    if active
+                    else f"{provider.display_name}: выключен — нажмите, чтобы включить"
+                )
+                label_controls: list[ft.Control] = [
+                    ft.Text(
+                        provider.display_name,
+                        size=COMPACT_UI.font_xs,
+                        weight=ft.FontWeight.BOLD if active else None,
+                        color=ft.Colors.ON_PRIMARY if active else ft.Colors.ON_SURFACE_VARIANT,
+                    )
+                ]
+            else:
+                on_click = lambda _, pid=provider.provider_id: (
+                    app.theme_settings.open_provider_configuration_dialog(pid)
+                )
+                tooltip = f"{provider.display_name}: не настроен — нажмите, чтобы настроить"
+                label_controls = [
+                    ft.Icon(ft.Icons.WARNING_AMBER, size=13, color=ft.Colors.ERROR),
+                    ft.Text(
+                        provider.display_name,
+                        size=COMPACT_UI.font_xs,
+                        color=ft.Colors.ON_SURFACE_VARIANT,
+                    ),
+                ]
+
+            chips.append(
+                ft.Container(
+                    content=ft.Row(controls=label_controls, spacing=4, tight=True),
+                    bgcolor=ft.Colors.PRIMARY if active else ft.Colors.SURFACE_CONTAINER_HIGH,
+                    border_radius=999,
+                    padding=ft.Padding.symmetric(horizontal=12, vertical=6),
+                    tooltip=tooltip,
+                    on_click=on_click,
+                    ink=True,
+                )
+            )
+
+        return self.surface_card(
+            ft.Row(controls=chips, wrap=True, spacing=COMPACT_UI.space_sm)
         )
 
     def bulk_metadata_search_card(self) -> ft.Control:

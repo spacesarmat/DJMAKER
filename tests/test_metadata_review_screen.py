@@ -10,6 +10,7 @@ from unittest.mock import Mock
 import flet as ft
 
 from djmaker.domain.models import AudioMetadata, AudioTechnicalInfo, TrackRecord
+from djmaker.settings import AppSettings
 from djmaker.ui.navigation_cards_controls import NavigationCardsController
 
 
@@ -160,6 +161,66 @@ class MetadataReviewScreenTests(unittest.TestCase):
         self.controller.dismiss_metadata_review(7)
 
         self.controller.show_plugins.assert_not_called()
+
+
+class ProviderStatusRowTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.app = SimpleNamespace()
+        self.app.settings = AppSettings(metadata_providers=("musicbrainz",))
+        self.app.theme_settings = Mock()
+        self.app.service = Mock()
+        self.controller = NavigationCardsController(self.app)
+
+    @staticmethod
+    def _provider(provider_id: str, display_name: str, configured: bool | None = None) -> Mock:
+        provider = Mock()
+        provider.provider_id = provider_id
+        provider.display_name = display_name
+        if configured is None:
+            del provider.is_configured
+        else:
+            provider.is_configured = Mock(return_value=configured)
+        return provider
+
+    def _chips(self, providers: list[Mock]) -> list[ft.Container]:
+        self.app.service.plugins.all = Mock(return_value=providers)
+        card = self.controller.provider_status_row()
+        return list(card.content.controls)
+
+    def test_selected_provider_is_highlighted(self) -> None:
+        chips = self._chips([self._provider("musicbrainz", "MusicBrainz")])
+
+        self.assertEqual(chips[0].bgcolor, ft.Colors.PRIMARY)
+
+    def test_unselected_provider_is_not_highlighted(self) -> None:
+        chips = self._chips([self._provider("deezer", "Deezer")])
+
+        self.assertEqual(chips[0].bgcolor, ft.Colors.SURFACE_CONTAINER_HIGH)
+
+    def test_unconfigured_provider_is_not_highlighted_even_if_selected(self) -> None:
+        self.app.settings = AppSettings(metadata_providers=("spotify",))
+        chips = self._chips([self._provider("spotify", "Spotify", configured=False)])
+
+        self.assertEqual(chips[0].bgcolor, ft.Colors.SURFACE_CONTAINER_HIGH)
+        self.assertIn("не настроен", chips[0].tooltip)
+
+    def test_click_on_configured_provider_toggles_it(self) -> None:
+        chips = self._chips([self._provider("deezer", "Deezer")])
+
+        chips[0].on_click(None)
+
+        self.app.theme_settings.toggle_metadata_provider.assert_called_once_with("deezer")
+        self.app.theme_settings.open_provider_configuration_dialog.assert_not_called()
+
+    def test_click_on_unconfigured_provider_opens_configuration_dialog(self) -> None:
+        chips = self._chips([self._provider("spotify", "Spotify", configured=False)])
+
+        chips[0].on_click(None)
+
+        self.app.theme_settings.open_provider_configuration_dialog.assert_called_once_with(
+            "spotify"
+        )
+        self.app.theme_settings.toggle_metadata_provider.assert_not_called()
 
 
 if __name__ == "__main__":

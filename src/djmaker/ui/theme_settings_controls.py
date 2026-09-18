@@ -701,13 +701,21 @@ class ThemeSettingsController:
         )
 
     def on_metadata_provider_toggled(self, event: object, provider_id: str) -> None:
-        app = self.app
         control = getattr(event, "control", None)
         checked = bool(getattr(control, "value", False))
+        self.set_metadata_provider_enabled(provider_id, checked)
+
+    def toggle_metadata_provider(self, provider_id: str) -> None:
+        """Переключает провайдер по клику на чипе (без чекбокса под рукой)."""
+        enabled = provider_id not in self.app.settings.metadata_providers
+        self.set_metadata_provider_enabled(provider_id, enabled)
+
+    def set_metadata_provider_enabled(self, provider_id: str, enabled: bool) -> None:
+        app = self.app
         current = list(app.settings.metadata_providers)
-        if checked and provider_id not in current:
+        if enabled and provider_id not in current:
             current.append(provider_id)
-        elif not checked and provider_id in current:
+        elif not enabled and provider_id in current:
             current.remove(provider_id)
         self.save_and_apply_settings(replace(app.settings, metadata_providers=tuple(current)))
 
@@ -840,6 +848,8 @@ class ThemeSettingsController:
 
         if app.navigation.selected_index == 6:
             app.show_settings()
+        elif app.navigation.selected_index == 3:
+            app.show_plugins()
         else:
             app.page.update()
 

@@ -1013,7 +1013,10 @@ class LibrarySearchController:
                 else:
                     app.page.pop_dialog()
                     app._notify("Метаданные применены")
-                    app.show_library()
+                    if app.navigation.selected_index == 3:
+                        app.show_plugins()
+                    else:
+                        app.show_library()
                 finally:
                     app._set_busy(False)
 
