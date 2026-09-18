@@ -11,6 +11,9 @@ from djmaker.settings import AppSettings, THEME_PALETTES
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 THEME_SOURCE = PROJECT_ROOT / "src" / "djmaker" / "ui" / "theme.py"
 APP_SOURCE = PROJECT_ROOT / "src" / "djmaker" / "ui" / "app.py"
+THEME_SETTINGS_SOURCE = (
+    PROJECT_ROOT / "src" / "djmaker" / "ui" / "theme_settings_controls.py"
+)
 
 
 class ThemePaletteTests(unittest.TestCase):
@@ -36,9 +39,9 @@ class ThemePaletteTests(unittest.TestCase):
         self.assertIn("overrides=settings.theme_dark_overrides", source)
 
     def test_settings_show_palette_description(self) -> None:
-        source = APP_SOURCE.read_text(encoding="utf-8")
+        source = THEME_SETTINGS_SOURCE.read_text(encoding="utf-8")
 
-        self.assertIn("palette_description(self.settings.theme_palette)", source)
+        self.assertIn("palette_description(app.settings.theme_palette)", source)
 
 
 if __name__ == "__main__":

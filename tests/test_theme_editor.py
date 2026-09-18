@@ -13,6 +13,9 @@ from djmaker.settings import AppSettings, SettingsStore, is_valid_theme_color
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 APP_SOURCE = PROJECT_ROOT / "src" / "djmaker" / "ui" / "app.py"
 THEME_SOURCE = PROJECT_ROOT / "src" / "djmaker" / "ui" / "theme.py"
+THEME_SETTINGS_SOURCE = (
+    PROJECT_ROOT / "src" / "djmaker" / "ui" / "theme_settings_controls.py"
+)
 
 
 class ThemeEditorTests(unittest.TestCase):
@@ -68,12 +71,13 @@ class ThemeEditorTests(unittest.TestCase):
 
     def test_settings_contains_live_preview_editor(self) -> None:
         source = APP_SOURCE.read_text(encoding="utf-8")
+        theme_settings_source = THEME_SETTINGS_SOURCE.read_text(encoding="utf-8")
 
-        self.assertIn('"Глобальный редактор темы"', source)
+        self.assertIn('"Глобальный редактор темы"', theme_settings_source)
         self.assertIn("_apply_theme_editor_preview", source)
-        self.assertIn("is_valid_theme_color", source)
-        self.assertIn('content="Вернуть сохранённое"', source)
-        self.assertIn('content="Сбросить текущую схему"', source)
+        self.assertIn("is_valid_theme_color", theme_settings_source)
+        self.assertIn('content="Вернуть сохранённое"', theme_settings_source)
+        self.assertIn('content="Сбросить текущую схему"', theme_settings_source)
 
 
 if __name__ == "__main__":

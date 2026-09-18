@@ -42,10 +42,12 @@ class LibraryScaleUITests(unittest.TestCase):
         )
 
     def test_scale_change_recenters_selected_track(self) -> None:
-        source = UI_SOURCE.read_text(encoding="utf-8")
+        library_search_source = LIBRARY_SEARCH_SOURCE.read_text(encoding="utf-8")
 
-        self.assertIn("selected_track_id = self._selected_track_id", source)
-        self.assertIn("self._select_library_track,", source)
+        self.assertIn(
+            "selected_track_id = app._selected_track_id", library_search_source
+        )
+        self.assertIn("app._select_library_track,", library_search_source)
 
 
 if __name__ == "__main__":

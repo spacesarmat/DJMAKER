@@ -18,6 +18,7 @@ from djmaker.services.library import LibraryService
 from djmaker.settings import AppSettings, SettingsStore
 from djmaker.ui.app import DJMakerUI
 from djmaker.ui.library_search_controls import LibrarySearchController
+from djmaker.ui.theme_settings_controls import ThemeSettingsController
 
 
 class LibrarySortDatabaseTests(unittest.TestCase):
@@ -171,6 +172,7 @@ class LibrarySortUITests(unittest.TestCase):
         self.ui.settings_store = Mock()
         self.ui.page = Mock()
         self.ui.library_search = LibrarySearchController(self.ui)
+        self.ui.theme_settings = ThemeSettingsController(self.ui)
         self.ui.show_library = Mock()
         self.ui._notify = Mock()
         self.ui._search_revision = 10
@@ -202,7 +204,7 @@ class LibrarySortUITests(unittest.TestCase):
         ui = self.ui
         ui.settings_store.save.side_effect = OSError("disk full")
         control = ft.Dropdown(value="bpm")
-        with self.assertLogs("djmaker.ui.app", level="ERROR"):
+        with self.assertLogs("djmaker.ui.theme_settings_controls", level="ERROR"):
             ui._on_library_sort_selected(SimpleNamespace(control=control))
         self.assertEqual(ui.settings, AppSettings())
         self.assertEqual(control.value, "artist")

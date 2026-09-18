@@ -70,7 +70,7 @@ class LibraryScrollingTests(unittest.TestCase):
 
         self.assertIn("self._selected_track_id", source)
         self.assertIn("self._track_row_cards", source)
-        self.assertIn("self._select_library_track", source)
+        self.assertIn("app._select_library_track", track_row_source)
         self.assertIn("ft.Colors.SURFACE_CONTAINER_HIGH", track_row_source)
 
 
