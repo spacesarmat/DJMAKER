@@ -32,6 +32,19 @@ if TYPE_CHECKING:
 
 LOGGER = logging.getLogger(__name__)
 
+
+def _readable_text_color(hex_color: str) -> str:
+    """Чёрный или белый текст — смотря что читается лучше на этом фоне."""
+    red = int(hex_color[1:3], 16) / 255
+    green = int(hex_color[3:5], 16) / 255
+    blue = int(hex_color[5:7], 16) / 255
+    luminance = 0.299 * red + 0.587 * green + 0.114 * blue
+    return ft.Colors.BLACK if luminance > 0.55 else ft.Colors.WHITE
+
+
+# Достаточно широкая, чтобы код Camelot (напр. "12B") умещался и читался.
+TONALITY_BAR_WIDTH = 28
+
 # Неброский тон подсветки строки: базовый цвет бакета с низкой непрозрачностью
 # поверх обычного фона карточки трека.
 ENERGY_HIGHLIGHT_OPACITY = 0.16
@@ -187,7 +200,7 @@ class TrackRowController:
         return ft.Colors.SURFACE_CONTAINER_LOW
 
     def track_tonality_bar(self, track: TrackRecord) -> ft.Control:
-        """Тонкая вертикальная полоса тональности по цвету колеса Camelot."""
+        """Вертикальная полоса тональности: цвет и код по колесу Camelot."""
         analysis = track.analysis
         camelot = analysis.camelot if analysis else ""
         color = camelot_to_color(camelot) if camelot else None
@@ -197,11 +210,19 @@ class TrackRowController:
         else:
             tooltip = "Тональность не определена"
         return ft.Container(
-            width=6,
+            width=self.library_size(TONALITY_BAR_WIDTH),
             height=self.library_size(COMPACT_UI.track_icon_box),
             bgcolor=color or ft.Colors.SURFACE_CONTAINER_HIGHEST,
             border_radius=3,
+            alignment=ft.Alignment.CENTER,
             tooltip=tooltip,
+            content=ft.Text(
+                camelot or "—",
+                size=COMPACT_UI.font_sm,
+                weight=ft.FontWeight.BOLD,
+                color=_readable_text_color(color) if color else ft.Colors.ON_SURFACE_VARIANT,
+                text_align=ft.TextAlign.CENTER,
+            ),
         )
 
     def track_title_row(self, track: TrackRecord) -> ft.Control:

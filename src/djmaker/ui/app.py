@@ -44,6 +44,7 @@ from djmaker.settings import (
 from djmaker.ui.density import COMPACT_UI
 from djmaker.ui.beat_grid_editor import BeatGridEditorUI
 from djmaker.ui.drop_import_controls import DropImportController
+from djmaker.ui.faq_controls import FaqController
 from djmaker.ui.library_search_controls import LibrarySearchController
 from djmaker.ui.navigation_cards_controls import NavigationCardsController
 from djmaker.ui.player_controls import PlayerControlsController
@@ -224,6 +225,7 @@ class DJMakerUI(BeatGridEditorUI, PlaylistUI):
         self.task_progress = TaskProgressController(self)
         self.navigation_cards = NavigationCardsController(self)
         self.track_row = TrackRowController(self)
+        self.faq = FaqController(self)
 
     def build(self) -> None:
         """Строит главное окно приложения."""
@@ -427,6 +429,11 @@ class DJMakerUI(BeatGridEditorUI, PlaylistUI):
                     icon=ft.Icons.QUEUE_MUSIC,
                     label="Плейлисты",
                 ),
+                ft.NavigationRailDestination(
+                    icon=ft.Icons.HELP_OUTLINE,
+                    selected_icon=ft.Icons.HELP,
+                    label="FAQ",
+                ),
             ],
             on_change=self._on_navigation_change,
         )
@@ -443,6 +450,7 @@ class DJMakerUI(BeatGridEditorUI, PlaylistUI):
             self.show_tasks,
             self.show_settings,
             self.show_playlists,
+            self.show_faq,
         )
         if isinstance(index, int) and 0 <= index < len(handlers):
             handlers[index]()
@@ -775,6 +783,10 @@ class DJMakerUI(BeatGridEditorUI, PlaylistUI):
     def show_settings(self) -> None:
         """Показывает настройки оформления и локальные пути приложения."""
         self.theme_settings.show_settings()
+
+    def show_faq(self) -> None:
+        """Показывает раздел часто задаваемых вопросов."""
+        self.faq.show_faq()
 
     def _open_database_reset_dialog(self, _: object) -> None:
         """Запрашивает подтверждение полного сброса SQLite-медиатеки."""
