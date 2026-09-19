@@ -12,10 +12,17 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # --no-rich-output: flet's rich/emoji console output crashes with
+          # UnicodeEncodeError on the cp1252 GitHub Actions Windows console.
           - os: windows-latest
             target: windows
+            build_args: --no-rich-output
+          # --arch arm64: onnxruntime publishes no macOS x86_64 wheel for
+          # Python 3.14, which breaks flet's default universal (arm64+x64)
+          # macOS build; ship Apple Silicon only until that wheel exists.
           - os: macos-latest
             target: macos
+            build_args: --arch arm64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
@@ -27,7 +34,7 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e . "flet[cli]==0.86.5"
       - name: Build
-        run: flet build ${{ matrix.target }} --yes
+        run: flet build ${{ matrix.target }} --yes ${{ matrix.build_args }}
       - name: Package build output (Windows)
         if: matrix.target == 'windows'
         shell: pwsh
