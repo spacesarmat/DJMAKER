@@ -2,6 +2,9 @@ name: build-desktop
 
 on:
   workflow_dispatch:
+  push:
+    tags:
+      - "v*"
 
 jobs:
   build:
@@ -25,8 +28,54 @@ jobs:
           python -m pip install -e . "flet[cli]==0.86.5"
       - name: Build
         run: flet build ${{ matrix.target }} --yes
+      - name: Package build output (Windows)
+        if: matrix.target == 'windows'
+        shell: pwsh
+        run: Compress-Archive -Path build/windows/* -DestinationPath DJMAKER-windows.zip
+      - name: Package build output (macOS)
+        if: matrix.target == 'macos'
+        run: |
+          cd build/macos
+          zip -r ../../DJMAKER-macos.zip .
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
           name: DJMAKER-${{ matrix.target }}
-          path: build/${{ matrix.target }}
+          path: DJMAKER-${{ matrix.target }}.zip
+          if-no-files-found: error
+
+  publish:
+    name: Publish release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: DJMAKER-*
+          path: dist
+          merge-multiple: true
+
+      - name: Generate release checksums
+        working-directory: dist
+        run: sha256sum *.zip > SHA256SUMS.txt
+
+      - name: Show produced files
+        run: ls -lh dist && cat dist/SHA256SUMS.txt
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$TAG" dist/* \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "DJMAKER $TAG" \
+              --notes "Автоматическая сборка для Windows и macOS из тега $TAG (flet build)."
+          fi
