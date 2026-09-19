@@ -185,6 +185,27 @@ class ThemeSettingsController:
             app.page.run_task(app._select_library_track, selected_track_id)
         return True
 
+    async def ensure_ast_model_download(self) -> None:
+        """Фоново скачивает AST-модель жанрового уточнения (по запросу)."""
+        app = self.app
+        if app.runtime_report.ast.available:
+            return
+        app._set_status("Загрузка AST-модели жанрового уточнения (~170МБ)...")
+        try:
+            status = await app.workers.run(app.runtime.ensure_ast_model)
+        except Exception as exc:
+            LOGGER.exception("Ошибка загрузки AST-модели")
+            app._notify(f"Не удалось загрузить AST-модель: {exc}")
+            return
+
+        app.runtime_report = replace(app.runtime_report, ast=status)
+        if status.available:
+            app._notify("AST-модель жанрового уточнения готова")
+        else:
+            app._notify(f"AST-модель недоступна: {status.detail}")
+        if app.navigation.selected_index == 6:
+            app.show_settings()
+
     async def ensure_runtime_dependencies(self) -> None:
         """Фоново проверяет и устанавливает FFmpeg/Essentia при запуске."""
         app = self.app
@@ -213,6 +234,9 @@ class ThemeSettingsController:
 
         if app.navigation.selected_index == 6:
             app.show_settings()
+
+        if app.settings.energy_genre_refinement_enabled:
+            await self.ensure_ast_model_download()
 
     def genre_refinement_card(self) -> ft.Control:
         """Тумблеры жанрового AST-уточнения цвета энергии и GPU-ускорения."""
@@ -254,11 +278,14 @@ class ThemeSettingsController:
         )
 
     def on_genre_refinement_toggled(self, event: object) -> None:
+        app = self.app
         control = getattr(event, "control", None)
         checked = bool(getattr(control, "value", False))
         self.save_and_apply_settings(
-            replace(self.app.settings, energy_genre_refinement_enabled=checked)
+            replace(app.settings, energy_genre_refinement_enabled=checked)
         )
+        if checked and not app.runtime_report.ast.available:
+            app.page.run_task(app.ensure_ast_model_download)
 
     def on_genre_gpu_toggled(self, event: object) -> None:
         control = getattr(event, "control", None)

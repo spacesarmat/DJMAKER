@@ -749,6 +749,10 @@ class DJMakerUI(BeatGridEditorUI, PlaylistUI):
         """Фоново проверяет и устанавливает FFmpeg/Essentia при запуске."""
         await self.theme_settings.ensure_runtime_dependencies()
 
+    async def ensure_ast_model_download(self) -> None:
+        """Фоново скачивает AST-модель жанрового уточнения (по запросу)."""
+        await self.theme_settings.ensure_ast_model_download()
+
     def _retry_runtime_dependencies(self, _: object) -> None:
         """Повторно запускает проверку/установку из экрана настроек."""
         self.theme_settings.retry_runtime_dependencies(_)
