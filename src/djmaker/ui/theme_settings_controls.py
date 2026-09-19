@@ -148,6 +148,22 @@ class ThemeSettingsController:
             library_sort_descending=not app.settings.library_sort_descending,
         ))
 
+    def toggle_energy_highlight(self, _: object) -> None:
+        """Вкл/выкл подсветку строк медиатеки по цвету энергии (AIR)."""
+        app = self.app
+        settings = replace(
+            app.settings,
+            energy_highlight_enabled=not app.settings.energy_highlight_enabled,
+        )
+        try:
+            app.settings_store.save(settings)
+        except OSError as exc:
+            LOGGER.exception("Не удалось сохранить настройку подсветки энергии")
+            app._notify(f"Не удалось сохранить настройку: {exc}")
+            return
+        app.settings = settings
+        app.show_library(local_update=True)
+
     def apply_library_sort(self, settings: AppSettings) -> bool:
         app = self.app
         if settings == app.settings:
@@ -198,6 +214,59 @@ class ThemeSettingsController:
         if app.navigation.selected_index == 6:
             app.show_settings()
 
+    def genre_refinement_card(self) -> ft.Control:
+        """Тумблеры жанрового AST-уточнения цвета энергии и GPU-ускорения."""
+        app = self.app
+        return app._surface_card(
+            ft.Column(
+                controls=[
+                    ft.Row(
+                        controls=[
+                            ft.Icon(ft.Icons.AUTO_AWESOME, color=ft.Colors.PRIMARY),
+                            ft.Text(
+                                "Жанровое уточнение цвета энергии",
+                                size=COMPACT_UI.font_lg,
+                                weight=ft.FontWeight.BOLD,
+                            ),
+                        ]
+                    ),
+                    ft.Text(
+                        "AST (AudioSet) уточняет цвет подсветки для тяжёлых/мрачных и "
+                        "эмбиент-треков, которые чистая энергия не различает. Модель "
+                        "(~170МБ) загружается по требованию, не при запуске приложения.",
+                        size=COMPACT_UI.font_xs,
+                        color=ft.Colors.ON_SURFACE_VARIANT,
+                    ),
+                    ft.Checkbox(
+                        label="Включить жанровое уточнение (медленнее полного анализа)",
+                        value=app.settings.energy_genre_refinement_enabled,
+                        on_change=self.on_genre_refinement_toggled,
+                    ),
+                    ft.Checkbox(
+                        label="Использовать GPU (DirectML/CoreML, при наличии)",
+                        value=app.settings.energy_genre_gpu_enabled,
+                        disabled=not app.settings.energy_genre_refinement_enabled,
+                        on_change=self.on_genre_gpu_toggled,
+                    ),
+                ],
+                spacing=5,
+            )
+        )
+
+    def on_genre_refinement_toggled(self, event: object) -> None:
+        control = getattr(event, "control", None)
+        checked = bool(getattr(control, "value", False))
+        self.save_and_apply_settings(
+            replace(self.app.settings, energy_genre_refinement_enabled=checked)
+        )
+
+    def on_genre_gpu_toggled(self, event: object) -> None:
+        control = getattr(event, "control", None)
+        checked = bool(getattr(control, "value", False))
+        self.save_and_apply_settings(
+            replace(self.app.settings, energy_genre_gpu_enabled=checked)
+        )
+
     def retry_runtime_dependencies(self, _: object) -> None:
         """Повторно запускает проверку/установку из экрана настроек."""
         app = self.app
@@ -227,10 +296,13 @@ class ThemeSettingsController:
                     ),
                     self.runtime_status_row(report.ffmpeg),
                     self.runtime_status_row(report.essentia),
+                    self.runtime_status_row(report.ast),
                     ft.Text(
                         "FFmpeg декодирует аудио. Essentia используется как собственная "
                         "lightweight-сборка DJMAKER с KISS FFT и загружается из Releases "
-                        "этого репозитория после проверки SHA-256.",
+                        "этого репозитория после проверки SHA-256. AST — опциональная модель "
+                        "жанрового уточнения цвета энергии, загружается по требованию при "
+                        "включении соответствующей настройки.",
                         size=COMPACT_UI.font_xs,
                         color=ft.Colors.ON_SURFACE_VARIANT,
                     ),
@@ -593,6 +665,7 @@ class ThemeSettingsController:
         settings_list = ft.ListView(
             controls=[
                 self.runtime_card(app.runtime_report),
+                self.genre_refinement_card(),
                 appearance,
                 theme_editor,
                 metadata_sources,

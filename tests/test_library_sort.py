@@ -96,6 +96,15 @@ class LibrarySortDatabaseTests(unittest.TestCase):
         self.assertEqual(self.order("bpm"), ["a", "b", "c", "d"])
         self.assertEqual(self.order("camelot"), ["a", "c", "b", "d"])
 
+    def test_energy_sort_orders_by_analysis_energy_missing_last(self) -> None:
+        with self.db.connection() as conn:
+            conn.execute("UPDATE tracks SET analysis_energy=30 WHERE file_hash='a'")
+            conn.execute("UPDATE tracks SET analysis_energy=90 WHERE file_hash='b'")
+            conn.execute("UPDATE tracks SET analysis_energy=60 WHERE file_hash='c'")
+            conn.commit()
+        self.assertEqual(self.order("energy"), ["a", "c", "b", "d"])
+        self.assertEqual(self.order("energy", True), ["b", "c", "a", "d"])
+
     def test_invalid_analysis_falls_back_to_tags(self) -> None:
         with self.db.connection() as conn:
             conn.execute(
@@ -197,7 +206,7 @@ class LibrarySortUITests(unittest.TestCase):
         self.assertTrue(ui.settings.library_sort_descending)
         row = ui._library_sort_control()
         self.assertEqual(row.controls[0].value, "artist")
-        self.assertEqual(len(row.controls[0].options), 7)
+        self.assertEqual(len(row.controls[0].options), 8)
         self.assertEqual(row.controls[1].icon, ft.Icons.ARROW_DOWNWARD)
 
     def test_save_failure_restores_control_without_changing_order(self) -> None:

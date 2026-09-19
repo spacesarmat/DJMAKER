@@ -5,6 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+import numpy as np
 from mutagen.easymp4 import EasyMP4Tags
 from mutagen.id3 import ID3, TBPM, TKEY
 from mutagen.mp4 import MP4, MP4FreeForm, MP4Tags
@@ -185,6 +186,152 @@ class LibraryAnalysisTagSyncTests(unittest.TestCase):
             database.update_after_file_change.call_args.kwargs["file_hash"],
         )
         database.save_audio_analysis.assert_called_once_with(7, analysis)
+
+
+class GenreClassificationWiringTests(unittest.TestCase):
+    def _service(self) -> tuple[LibraryService, TrackRecord]:
+        track_path = Path("/music/track.mp3")
+        track = TrackRecord(
+            id=3,
+            path=track_path,
+            root_path=Path("/music"),
+            size=1,
+            mtime_ns=1,
+            extension=".mp3",
+            file_hash="h",
+            metadata=AudioMetadata(title="T"),
+            technical=AudioTechnicalInfo(),
+        )
+        database = Mock()
+        database.get_track.return_value = track
+        scanner = Mock()
+        scanner.inspect_and_hash.return_value = (
+            InspectedAudio(path=track_path, metadata=AudioMetadata(), technical=AudioTechnicalInfo()),
+            "h",
+            SimpleNamespace(st_size=1, st_mtime_ns=1),
+        )
+        tags = Mock()
+        analyzer = Mock()
+        analyzer.analyze.return_value = AudioAnalysis(bpm=120.0, musical_key="A", scale="minor")
+        analyzer.runtime = Mock()
+
+        service = LibraryService(
+            database=database,
+            scanner=scanner,
+            tags=tags,
+            organizer=Mock(),
+            plugins=Mock(),
+            analyzer=analyzer,
+            artwork_cache=Mock(),
+            waveform_analyzer=Mock(),
+        )
+        return service, track
+
+    def test_genre_classification_skipped_when_disabled(self) -> None:
+        service, _track = self._service()
+        fake_samples = np.zeros(1000, dtype=np.float32)
+
+        with (
+            patch("djmaker.services.library.decode_mono_pcm", return_value=fake_samples),
+            patch("djmaker.services.library.GenreClassifier") as classifier_cls,
+        ):
+            service.analyze_track(3, genre_refinement_enabled=False)
+
+        classifier_cls.assert_not_called()
+
+    def test_genre_classification_result_is_attached_to_analysis(self) -> None:
+        service, _track = self._service()
+        fake_samples = np.zeros(1000, dtype=np.float32)
+        fake_classifier = Mock()
+        fake_classifier.available.return_value = True
+        fake_classifier.classify.return_value = "heavy_dark"
+        fake_classifier.gpu_enabled = True
+
+        with (
+            patch("djmaker.services.library.decode_mono_pcm", return_value=fake_samples),
+            patch(
+                "djmaker.services.library.GenreClassifier", return_value=fake_classifier
+            ) as classifier_cls,
+        ):
+            service.analyze_track(3, genre_refinement_enabled=True, genre_gpu_enabled=True)
+
+        classifier_cls.assert_called_once_with(service.analyzer.runtime, gpu_enabled=True)
+        fake_classifier.classify.assert_called_once()
+        service.database.save_audio_analysis.assert_called_once()
+        saved_analysis = service.database.save_audio_analysis.call_args.args[1]
+        self.assertEqual("heavy_dark", saved_analysis.genre_tag)
+
+    def test_classifier_skips_inference_when_model_not_available(self) -> None:
+        service, _track = self._service()
+        fake_samples = np.zeros(1000, dtype=np.float32)
+        fake_classifier = Mock()
+        fake_classifier.available.return_value = False
+        fake_classifier.gpu_enabled = True
+
+        with (
+            patch("djmaker.services.library.decode_mono_pcm", return_value=fake_samples),
+            patch("djmaker.services.library.GenreClassifier", return_value=fake_classifier),
+        ):
+            service.analyze_track(3, genre_refinement_enabled=True)
+
+        fake_classifier.classify.assert_not_called()
+
+    def test_genre_classifier_instance_is_reused_across_calls_with_same_gpu_setting(self) -> None:
+        service, _track = self._service()
+        fake_samples = np.zeros(1000, dtype=np.float32)
+        fake_classifier = Mock()
+        fake_classifier.available.return_value = True
+        fake_classifier.classify.return_value = ""
+        fake_classifier.gpu_enabled = True
+
+        with (
+            patch("djmaker.services.library.decode_mono_pcm", return_value=fake_samples),
+            patch(
+                "djmaker.services.library.GenreClassifier", return_value=fake_classifier
+            ) as classifier_cls,
+        ):
+            service.analyze_track(3, genre_refinement_enabled=True, genre_gpu_enabled=True)
+            service.analyze_track(3, genre_refinement_enabled=True, genre_gpu_enabled=True)
+
+        classifier_cls.assert_called_once()
+
+    def test_genre_classifier_is_recreated_when_gpu_setting_changes(self) -> None:
+        service, _track = self._service()
+        fake_samples = np.zeros(1000, dtype=np.float32)
+
+        def make_classifier(_runtime, *, gpu_enabled):
+            classifier = Mock()
+            classifier.available.return_value = True
+            classifier.classify.return_value = ""
+            classifier.gpu_enabled = gpu_enabled
+            return classifier
+
+        with (
+            patch("djmaker.services.library.decode_mono_pcm", return_value=fake_samples),
+            patch(
+                "djmaker.services.library.GenreClassifier", side_effect=make_classifier
+            ) as classifier_cls,
+        ):
+            service.analyze_track(3, genre_refinement_enabled=True, genre_gpu_enabled=True)
+            service.analyze_track(3, genre_refinement_enabled=True, genre_gpu_enabled=False)
+
+        self.assertEqual(2, classifier_cls.call_count)
+
+    def test_energy_failure_does_not_prevent_tag_write_or_db_sync(self) -> None:
+        service, _track = self._service()
+
+        with patch(
+            "djmaker.services.library.decode_mono_pcm",
+            side_effect=OSError("no ffmpeg"),
+        ):
+            result = service.analyze_track(3, genre_refinement_enabled=True)
+
+        service.tags.write_analysis.assert_called_once()
+        service.database.save_audio_analysis.assert_called_once()
+        saved_analysis = service.database.save_audio_analysis.call_args.args[1]
+        self.assertIsNone(saved_analysis.energy)
+        self.assertEqual("", saved_analysis.genre_tag)
+        self.assertIsNotNone(result)
 
 
 if __name__ == "__main__":

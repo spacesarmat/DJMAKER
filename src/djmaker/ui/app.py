@@ -577,6 +577,9 @@ class DJMakerUI(BeatGridEditorUI, PlaylistUI):
     def _toggle_library_sort_direction(self, _: object) -> None:
         self.theme_settings.toggle_library_sort_direction(_)
 
+    def _toggle_energy_highlight(self, _: object) -> None:
+        self.theme_settings.toggle_energy_highlight(_)
+
     def _apply_library_sort(self, settings: AppSettings) -> bool:
         return self.theme_settings.apply_library_sort(settings)
 

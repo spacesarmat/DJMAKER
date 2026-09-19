@@ -59,6 +59,9 @@ class AudioAnalysis:
     camelot: str = ""
     analyzed_at: str = ""
     beat_grid: BeatGridAnalysis | None = None
+    energy: float | None = None
+    noisiness: float | None = None
+    genre_tag: str = ""
 
 
 @dataclass(slots=True)

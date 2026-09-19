@@ -24,10 +24,12 @@ from djmaker.plugins.base import MetadataProviderError
 from djmaker.plugins.http_utils import urlopen_with_retry
 from djmaker.plugins.merge import merge_candidates
 from djmaker.plugins.registry import PluginRegistry
-from djmaker.services.audio_analysis import EssentiaAudioAnalyzer
+from djmaker.services.audio_analysis import ANALYSIS_SAMPLE_RATE, AudioAnalysisError, EssentiaAudioAnalyzer
 from djmaker.services.artwork import ArtworkCache, MAX_ARTWORK_BYTES
 from djmaker.services.audio_tags import AudioTagError, AudioTagService
 from djmaker.services.drop_import import DropImportPlan
+from djmaker.services.energy_analysis import compute_energy_features, decode_mono_pcm, energy_score
+from djmaker.services.genre_inference import GenreClassifier
 from djmaker.services.organizer import FileOrganizer
 from djmaker.services.scanner import LibraryScanner
 from djmaker.services.tasks import TaskControl
@@ -63,6 +65,7 @@ class LibraryService:
         self.analyzer = analyzer
         self.artwork_cache = artwork_cache
         self.waveform_analyzer = waveform_analyzer
+        self._genre_classifier: GenreClassifier | None = None
 
     @property
     def playlists(self) -> PlaylistRepository:
@@ -196,12 +199,27 @@ class LibraryService:
         self,
         track_id: int,
         task: TaskControl | None = None,
+        *,
+        genre_refinement_enabled: bool = True,
+        genre_gpu_enabled: bool = True,
     ) -> TrackRecord:
         """Анализирует трек, пишет BPM/Key в файл и синхронизирует SQLite."""
         if task is not None:
             task.checkpoint()
         track = self._require_track(track_id)
         analysis = self.analyzer.analyze(track.path, task=task)
+
+        try:
+            samples = decode_mono_pcm(self.analyzer.runtime, track.path)
+            features = compute_energy_features(samples)
+            analysis.energy = energy_score(features, analysis.bpm)
+            analysis.noisiness = features.spectral_flatness
+            if genre_refinement_enabled:
+                classifier = self._get_genre_classifier(genre_gpu_enabled)
+                if classifier.available():
+                    analysis.genre_tag = classifier.classify(samples, sample_rate=ANALYSIS_SAMPLE_RATE)
+        except (AudioAnalysisError, OSError) as exc:
+            LOGGER.warning("Не удалось посчитать энергию для %s: %s", track.path, exc)
 
         # После этой контрольной точки запись тегов и синхронизация БД выполняются
         # как единый участок: пауза не должна оставить уже изменённый файл со
@@ -229,6 +247,12 @@ class LibraryService:
         )
         self.database.save_audio_analysis(track_id, analysis)
         return self._require_track(track_id)
+
+    def _get_genre_classifier(self, gpu_enabled: bool) -> GenreClassifier:
+        """Переиспользует ONNX-сессию между треками одного запуска анализа."""
+        if self._genre_classifier is None or self._genre_classifier.gpu_enabled != gpu_enabled:
+            self._genre_classifier = GenreClassifier(self.analyzer.runtime, gpu_enabled=gpu_enabled)
+        return self._genre_classifier
 
     def update_tags(
         self,

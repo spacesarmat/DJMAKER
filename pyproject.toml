@@ -13,6 +13,9 @@ dependencies = [
     "flet-audio==0.86.5",
     "flet-dropzone==0.4.0",
     "mutagen==1.48.1",
+    "librosa>=0.10,<0.11",
+    "onnxruntime-directml>=1.17,<2; sys_platform == 'win32'",
+    "onnxruntime>=1.17,<2; sys_platform != 'win32'",
 ]
 
 [project.optional-dependencies]

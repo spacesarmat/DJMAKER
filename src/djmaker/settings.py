@@ -101,6 +101,9 @@ class AppSettings:
     spotify_client_id: str = ""
     spotify_client_secret: str = ""
     metadata_auto_apply_threshold: int = DEFAULT_METADATA_AUTO_APPLY_THRESHOLD
+    energy_genre_refinement_enabled: bool = True
+    energy_genre_gpu_enabled: bool = True
+    energy_highlight_enabled: bool = True
 
     @classmethod
     def from_mapping(cls, data: dict[str, Any]) -> "AppSettings":
@@ -163,6 +166,16 @@ class AppSettings:
             max(METADATA_AUTO_APPLY_THRESHOLD_MIN, auto_apply_threshold),
         )
 
+        genre_refinement_enabled = data.get("energy_genre_refinement_enabled", True)
+        if not isinstance(genre_refinement_enabled, bool):
+            genre_refinement_enabled = True
+        genre_gpu_enabled = data.get("energy_genre_gpu_enabled", True)
+        if not isinstance(genre_gpu_enabled, bool):
+            genre_gpu_enabled = True
+        highlight_enabled = data.get("energy_highlight_enabled", True)
+        if not isinstance(highlight_enabled, bool):
+            highlight_enabled = True
+
         return cls(
             theme_mode=mode,
             theme_palette=palette,
@@ -179,6 +192,9 @@ class AppSettings:
             spotify_client_id=spotify_client_id.strip(),
             spotify_client_secret=spotify_client_secret.strip(),
             metadata_auto_apply_threshold=auto_apply_threshold,
+            energy_genre_refinement_enabled=genre_refinement_enabled,
+            energy_genre_gpu_enabled=genre_gpu_enabled,
+            energy_highlight_enabled=highlight_enabled,
         )
 
 

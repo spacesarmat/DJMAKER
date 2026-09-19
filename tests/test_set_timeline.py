@@ -184,7 +184,7 @@ class SetTimelineRepositoryTests(unittest.TestCase):
             conn.commit()
         self.database.initialize()
         with self.database.connection() as conn:
-            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 8)
+            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 9)
         self.assertEqual(len(self.database.list_tracks()), 3)
 
 

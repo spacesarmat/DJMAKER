@@ -47,6 +47,21 @@ ESSENTIA_RELEASE_BASE = (
 ESSENTIA_CHECKSUMS_URL = f"{ESSENTIA_RELEASE_BASE}/SHA256SUMS.txt"
 ESSENTIA_BINARY_BASENAME = "djmaker-essentia"
 
+# Опциональная модель для уточнения жанрового/настроенческого бакета цвета
+# энергии (AIR). В отличие от FFmpeg/Essentia не входит в ensure_all() —
+# загружается лениво только при включённом уточнении жанра в настройках.
+AST_REPO = "onnx-community/ast-finetuned-audioset-10-10-0.4593-ONNX"
+AST_REPO_BASE = f"https://huggingface.co/{AST_REPO}/resolve/main"
+AST_ASSETS: tuple[tuple[str, str, int], ...] = (
+    # (относительный путь в репозитории, sha256, размер в байтах)
+    ("onnx/model_fp16.onnx", "910808cad2642170d7606326e0615c02a86fdce047767b8cd7106f11c5e9c6b9", 173_471_361),
+    ("config.json", "d4d347e95b00f4b1a0ea7eaf32bbbb2c246539ce1e64da89ffc0700c4a61ac8a", 26_860),
+    ("preprocessor_config.json", "8d04ba5a9c6fca5d39d0de2b1fd05ecf79deb589fbba279728bbebac39934231", 297),
+)
+AST_MODEL_FILENAME = "model_fp16.onnx"
+AST_CONFIG_FILENAME = "config.json"
+AST_PREPROCESSOR_FILENAME = "preprocessor_config.json"
+
 
 class RuntimeDependencyError(RuntimeError):
     """Ошибка проверки, загрузки или установки runtime-зависимости."""
@@ -71,6 +86,7 @@ class RuntimeReport:
 
     ffmpeg: DependencyStatus
     essentia: DependencyStatus
+    ast: DependencyStatus
 
 
 class RuntimeDependencies:
@@ -81,23 +97,127 @@ class RuntimeDependencies:
         self.ffmpeg_dir = self.root / "ffmpeg"
         self.essentia_dir = self.root / "essentia"
         self.python_packages_dir = self.essentia_dir / "python"
+        self.ast_dir = self.root / "ast"
         self.manifest_path = self.root / "manifest.json"
         self._lock = threading.Lock()
+        self._ast_lock = threading.Lock()
 
     def probe(self) -> RuntimeReport:
         """Проверяет зависимости без сети и без изменения системы."""
         return RuntimeReport(
             ffmpeg=self._probe_ffmpeg(),
             essentia=self._probe_essentia(),
+            ast=self._probe_ast(),
         )
 
     def ensure_all(self) -> RuntimeReport:
-        """Проверяет и автоматически устанавливает отсутствующие компоненты."""
+        """Проверяет и автоматически устанавливает отсутствующие компоненты.
+
+        AST-модель сюда намеренно не входит: это опциональное ~170МБ
+        уточнение жанра, а не обязательный компонент декодирования/анализа.
+        Она загружается лениво через ensure_ast_model() при первом
+        использовании (см. ensure_ast_model).
+        """
         with self._lock:
             self.root.mkdir(parents=True, exist_ok=True)
             ffmpeg = self._ensure_ffmpeg()
             essentia = self._ensure_essentia()
-            return RuntimeReport(ffmpeg=ffmpeg, essentia=essentia)
+            return RuntimeReport(ffmpeg=ffmpeg, essentia=essentia, ast=self._probe_ast())
+
+    def ast_model_path(self) -> Path | None:
+        """Возвращает путь к ONNX-модели AST, если она уже загружена и цела."""
+        status = self._probe_ast()
+        if not status.available:
+            return None
+        return self._managed_ast_path(AST_MODEL_FILENAME)
+
+    def ast_config_path(self) -> Path | None:
+        """Возвращает путь к config.json AST (содержит id2label)."""
+        status = self._probe_ast()
+        if not status.available:
+            return None
+        return self._managed_ast_path(AST_CONFIG_FILENAME)
+
+    def ast_preprocessor_config_path(self) -> Path | None:
+        """Возвращает путь к preprocessor_config.json AST (mean/std/mel-параметры)."""
+        status = self._probe_ast()
+        if not status.available:
+            return None
+        return self._managed_ast_path(AST_PREPROCESSOR_FILENAME)
+
+    def ensure_ast_model(self) -> DependencyStatus:
+        """Загружает и проверяет ONNX-модель AST (жанровое уточнение цвета).
+
+        Вызывается лениво из сервиса анализа только когда пользователь
+        включил жанровое уточнение — не при обычном запуске приложения.
+        """
+        with self._ast_lock:
+            current = self._probe_ast()
+            if current.available:
+                return current
+
+            LOGGER.info("AST-модель не найдена; загружается %s", AST_REPO)
+            self.ast_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                with tempfile.TemporaryDirectory(dir=self.root) as temp_name:
+                    temp_dir = Path(temp_name)
+                    for relative_path, expected_hash, expected_size in AST_ASSETS:
+                        target = self.ast_dir / Path(relative_path).name
+                        temp_file = temp_dir / Path(relative_path).name
+                        _download_file(f"{AST_REPO_BASE}/{relative_path}", temp_file)
+                        actual_size = temp_file.stat().st_size
+                        if actual_size != expected_size:
+                            raise RuntimeDependencyError(
+                                f"Неверный размер {relative_path}: "
+                                f"ожидалось {expected_size}, получено {actual_size}"
+                            )
+                        actual_hash = _sha256(temp_file)
+                        if actual_hash.lower() != expected_hash.lower():
+                            raise RuntimeDependencyError(
+                                f"Контрольная сумма {relative_path} не совпала: "
+                                f"ожидалась {expected_hash}, получена {actual_hash}"
+                            )
+                        _atomic_copy(temp_file, target)
+
+                status = self._probe_ast()
+                if not status.available:
+                    raise RuntimeDependencyError(
+                        f"AST-модель загружена, но проверка не пройдена: {status.detail}"
+                    )
+                self._update_manifest("ast", status, extra={"repo": AST_REPO})
+                return status
+            except (OSError, urllib.error.URLError, RuntimeDependencyError) as exc:
+                LOGGER.exception("Не удалось установить AST-модель")
+                return DependencyStatus(
+                    name="AST",
+                    available=False,
+                    managed=True,
+                    backend="onnxruntime",
+                    detail=f"Ошибка автоустановки: {exc}",
+                )
+
+    def _probe_ast(self) -> DependencyStatus:
+        for relative_path, _expected_hash, expected_size in AST_ASSETS:
+            target = self._managed_ast_path(Path(relative_path).name)
+            if not target.is_file() or target.stat().st_size != expected_size:
+                return DependencyStatus(
+                    name="AST",
+                    available=False,
+                    managed=True,
+                    backend="onnxruntime",
+                    detail="Модель жанрового уточнения не установлена (опционально)",
+                )
+        return DependencyStatus(
+            name="AST",
+            available=True,
+            managed=True,
+            path=str(self._managed_ast_path(AST_MODEL_FILENAME)),
+            backend="onnxruntime",
+            detail=f"AudioSet-классификатор · {AST_REPO}",
+        )
+
+    def _managed_ast_path(self, filename: str) -> Path:
+        return self.ast_dir / filename
 
     def ffmpeg_path(self) -> Path | None:
         """Возвращает путь к доступному ffmpeg или ``None``."""

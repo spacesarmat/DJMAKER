@@ -11,6 +11,17 @@ from typing import TYPE_CHECKING
 
 import flet as ft
 
+from djmaker.domain.camelot_color import camelot_to_color
+from djmaker.domain.energy_color import (
+    BUCKET_BLACK,
+    BUCKET_BLUE,
+    BUCKET_GREEN,
+    BUCKET_ORANGE,
+    BUCKET_PURPLE,
+    BUCKET_RED,
+    BUCKET_YELLOW,
+    energy_color_bucket,
+)
 from djmaker.domain.models import TrackRecord
 from djmaker.services.file_browser import reveal_file
 from djmaker.services.waveform import resample_waveform_peaks
@@ -20,6 +31,19 @@ if TYPE_CHECKING:
     from djmaker.ui.app import DJMakerUI
 
 LOGGER = logging.getLogger(__name__)
+
+# Неброский тон подсветки строки: базовый цвет бакета с низкой непрозрачностью
+# поверх обычного фона карточки трека.
+ENERGY_HIGHLIGHT_OPACITY = 0.16
+ENERGY_BUCKET_COLORS: dict[str, str] = {
+    BUCKET_RED: ft.Colors.RED,
+    BUCKET_YELLOW: ft.Colors.YELLOW,
+    BUCKET_ORANGE: ft.Colors.ORANGE,
+    BUCKET_GREEN: ft.Colors.GREEN,
+    BUCKET_BLUE: ft.Colors.BLUE,
+    BUCKET_PURPLE: ft.Colors.PURPLE,
+    BUCKET_BLACK: ft.Colors.BLUE_GREY_900,
+}
 
 
 @dataclass(slots=True)
@@ -75,6 +99,7 @@ class TrackRowController:
                     app._library_selection_checkbox(track.id),
                     self.track_artwork(track),
                     metadata_block,
+                    self.track_tonality_bar(track),
                     self.track_waveform(track),
                     app._playlist_track_menu(track.id),
                     ft.IconButton(
@@ -127,11 +152,7 @@ class TrackRowController:
             ),
             padding=self.library_size(COMPACT_UI.card_padding),
         )
-        card.bgcolor = (
-            ft.Colors.SURFACE_CONTAINER_HIGH
-            if app._selected_track_id == track.id
-            else ft.Colors.SURFACE_CONTAINER_LOW
-        )
+        card.bgcolor = self.track_row_bgcolor(track)
         app._track_row_cards[track.id] = card
         return ft.Container(
             height=self.track_item_extent(),
@@ -148,6 +169,39 @@ class TrackRowController:
                 ),
                 mouse_cursor=ft.MouseCursor.CLICK,
             ),
+        )
+
+    def track_row_bgcolor(self, track: TrackRecord) -> str:
+        """Цвет фона карточки трека: выделение важнее подсветки по энергии."""
+        app = self.app
+        if app._selected_track_id == track.id:
+            return ft.Colors.SURFACE_CONTAINER_HIGH
+        if app.settings.energy_highlight_enabled and track.analysis is not None:
+            analysis = track.analysis
+            bucket = energy_color_bucket(
+                analysis.energy, analysis.scale, analysis.noisiness, analysis.genre_tag
+            )
+            base_color = ENERGY_BUCKET_COLORS.get(bucket)
+            if base_color is not None:
+                return ft.Colors.with_opacity(ENERGY_HIGHLIGHT_OPACITY, base_color)
+        return ft.Colors.SURFACE_CONTAINER_LOW
+
+    def track_tonality_bar(self, track: TrackRecord) -> ft.Control:
+        """Тонкая вертикальная полоса тональности по цвету колеса Camelot."""
+        analysis = track.analysis
+        camelot = analysis.camelot if analysis else ""
+        color = camelot_to_color(camelot) if camelot else None
+        if analysis and camelot:
+            key_label = f"{analysis.musical_key} {analysis.scale}".strip()
+            tooltip = f"{key_label} · {camelot}" if key_label else camelot
+        else:
+            tooltip = "Тональность не определена"
+        return ft.Container(
+            width=6,
+            height=self.library_size(COMPACT_UI.track_icon_box),
+            bgcolor=color or ft.Colors.SURFACE_CONTAINER_HIGHEST,
+            border_radius=3,
+            tooltip=tooltip,
         )
 
     def track_title_row(self, track: TrackRecord) -> ft.Control:

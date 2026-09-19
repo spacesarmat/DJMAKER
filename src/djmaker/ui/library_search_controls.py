@@ -334,6 +334,19 @@ class LibrarySearchController:
                 ft.Container(expand=True),
                 app._library_batch_controls(),
                 app.busy,
+                ft.IconButton(
+                    icon=(
+                        ft.Icons.PALETTE
+                        if app.settings.energy_highlight_enabled
+                        else ft.Icons.PALETTE_OUTLINED
+                    ),
+                    tooltip=(
+                        "Подсветка по энергии: включена — нажмите, чтобы выключить"
+                        if app.settings.energy_highlight_enabled
+                        else "Подсветка по энергии: выключена — нажмите, чтобы включить"
+                    ),
+                    on_click=app._toggle_energy_highlight,
+                ),
                 ft.Button(
                     content="Полный анализ",
                     icon=ft.Icons.SPEED,

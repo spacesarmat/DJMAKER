@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import tempfile
 import unittest
 import zipfile
@@ -142,6 +143,93 @@ class RuntimeDependenciesTests(unittest.TestCase):
             self.assertIn("r5", status.detail)
             self.assertIn("r6", status.detail)
             self.assertIsNone(runtime.essentia_analyzer_path())
+
+
+class AstModelDependencyTests(unittest.TestCase):
+    def _fake_assets(self) -> tuple[tuple[str, str, int], ...]:
+        payloads = {
+            "onnx/model_fp16.onnx": b"fake-onnx-model",
+            "config.json": b'{"id2label": {"220": "Heavy metal"}}',
+            "preprocessor_config.json": b'{"mean": -4.2677393}',
+        }
+        self._payloads = payloads
+        return tuple(
+            (name, hashlib.sha256(data).hexdigest(), len(data))
+            for name, data in payloads.items()
+        )
+
+    def test_probe_reports_unavailable_when_files_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            runtime = RuntimeDependencies(Path(temp))
+            status = runtime._probe_ast()
+
+            self.assertFalse(status.available)
+            self.assertIsNone(runtime.ast_model_path())
+
+    def test_ensure_ast_model_downloads_and_verifies_all_assets(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            runtime = RuntimeDependencies(Path(temp))
+            fake_assets = self._fake_assets()
+
+            def fake_download(url: str, destination: Path) -> None:
+                name = url.rsplit("/", 1)[-1]
+                for asset_name, _hash, _size in fake_assets:
+                    if asset_name.endswith(name):
+                        destination.parent.mkdir(parents=True, exist_ok=True)
+                        destination.write_bytes(self._payloads[asset_name])
+                        return
+                raise AssertionError(f"unexpected download url: {url}")
+
+            with (
+                patch("djmaker.runtime.dependencies.AST_ASSETS", fake_assets),
+                patch("djmaker.runtime.dependencies._download_file", side_effect=fake_download),
+            ):
+                status = runtime.ensure_ast_model()
+
+                self.assertTrue(status.available)
+                self.assertTrue(status.managed)
+                self.assertIsNotNone(runtime.ast_model_path())
+                self.assertIsNotNone(runtime.ast_config_path())
+                self.assertIsNotNone(runtime.ast_preprocessor_config_path())
+
+    def test_ensure_ast_model_rejects_checksum_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            runtime = RuntimeDependencies(Path(temp))
+            fake_assets = self._fake_assets()
+
+            def fake_download_corrupted(url: str, destination: Path) -> None:
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(b"corrupted-payload")
+
+            with (
+                patch("djmaker.runtime.dependencies.AST_ASSETS", fake_assets),
+                patch(
+                    "djmaker.runtime.dependencies._download_file",
+                    side_effect=fake_download_corrupted,
+                ),
+            ):
+                status = runtime.ensure_ast_model()
+
+            self.assertFalse(status.available)
+            self.assertIn("Ошибка автоустановки", status.detail)
+            self.assertIsNone(runtime.ast_model_path())
+
+    def test_ensure_ast_model_is_idempotent_when_already_installed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            runtime = RuntimeDependencies(Path(temp))
+            fake_assets = self._fake_assets()
+            runtime.ast_dir.mkdir(parents=True)
+            for name, _hash, _size in fake_assets:
+                (runtime.ast_dir / Path(name).name).write_bytes(self._payloads[name])
+
+            with (
+                patch("djmaker.runtime.dependencies.AST_ASSETS", fake_assets),
+                patch("djmaker.runtime.dependencies._download_file") as download,
+            ):
+                status = runtime.ensure_ast_model()
+
+            download.assert_not_called()
+            self.assertTrue(status.available)
 
 
 if __name__ == "__main__":

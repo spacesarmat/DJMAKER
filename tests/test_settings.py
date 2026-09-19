@@ -43,6 +43,36 @@ class SettingsStoreTests(unittest.TestCase):
             self.assertEqual("system", settings.theme_mode)
             self.assertEqual("djmaker_blue", settings.theme_palette)
 
+    def test_energy_genre_toggles_round_trip(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "settings.json"
+            store = SettingsStore(path)
+            expected = AppSettings(
+                energy_genre_refinement_enabled=False, energy_genre_gpu_enabled=False
+            )
+
+            store.save(expected)
+
+            self.assertEqual(expected, store.load())
+
+    def test_energy_genre_toggles_default_to_true_and_reject_non_bool(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "settings.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "energy_genre_refinement_enabled": "yes",
+                        "energy_genre_gpu_enabled": 1,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            settings = SettingsStore(path).load()
+
+            self.assertTrue(settings.energy_genre_refinement_enabled)
+            self.assertTrue(settings.energy_genre_gpu_enabled)
+
     def test_library_scale_round_trips_and_is_clamped(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "settings.json"

@@ -175,6 +175,62 @@ class LibraryDatabaseTests(unittest.TestCase):
         self.assertEqual((1, 1), self.db.beat_grid_counts())
         self.assertEqual([], self.db.list_tracks_for_analysis())
 
+    def test_energy_noisiness_and_genre_tag_round_trip(self) -> None:
+        self._insert("one.mp3", "abc")
+        track = self.db.list_tracks()[0]
+
+        self.db.save_audio_analysis(
+            track.id,
+            AudioAnalysis(
+                bpm=128.0,
+                musical_key="A",
+                scale="minor",
+                camelot="8A",
+                energy=72.5,
+                noisiness=0.18,
+                genre_tag="heavy_metal",
+            ),
+        )
+
+        updated = self.db.get_track(track.id)
+        self.assertIsNotNone(updated)
+        assert updated is not None
+        assert updated.analysis is not None
+        self.assertEqual(72.5, updated.analysis.energy)
+        self.assertEqual(0.18, updated.analysis.noisiness)
+        self.assertEqual("heavy_metal", updated.analysis.genre_tag)
+
+    def test_rescan_of_unchanged_file_preserves_energy_columns(self) -> None:
+        self._insert("one.mp3", "abc")
+        track = self.db.list_tracks()[0]
+        self.db.save_audio_analysis(
+            track.id,
+            AudioAnalysis(
+                bpm=128.0, musical_key="A", scale="minor", camelot="8A",
+                energy=61.0, noisiness=0.4, genre_tag="ambient_music",
+            ),
+        )
+        stat = track.path.stat()
+
+        self.db.upsert_track(
+            path=track.path,
+            root=self.root,
+            size=stat.st_size,
+            mtime_ns=stat.st_mtime_ns,
+            extension=track.path.suffix,
+            file_hash="abc",  # тот же hash: файл не менялся
+            metadata=track.metadata,
+            technical=track.technical,
+            scan_token="next",
+        )
+
+        updated = self.db.get_track(track.id)
+        assert updated is not None
+        assert updated.analysis is not None
+        self.assertEqual(61.0, updated.analysis.energy)
+        self.assertEqual(0.4, updated.analysis.noisiness)
+        self.assertEqual("ambient_music", updated.analysis.genre_tag)
+
     def test_changed_file_hash_invalidates_previous_analysis(self) -> None:
         self._insert("one.mp3", "abc")
         track = self.db.list_tracks()[0]
@@ -296,7 +352,7 @@ class LibraryDatabaseTests(unittest.TestCase):
         self.assertEqual((0, 0), self.db.waveform_counts())
         with self.db.connection() as conn:
             self.assertEqual(
-                8,
+                9,
                 conn.execute("PRAGMA user_version").fetchone()[0],
             )
 
@@ -412,7 +468,7 @@ class LibraryDatabaseMigrationTests(unittest.TestCase):
                     for row in conn.execute("PRAGMA table_info(tracks)").fetchall()
                 }
 
-            self.assertEqual(8, version)
+            self.assertEqual(9, version)
             self.assertIn("analysis_bpm", columns)
             self.assertIn("analysis_key", columns)
             self.assertIn("analysis_camelot", columns)
@@ -426,6 +482,9 @@ class LibraryDatabaseMigrationTests(unittest.TestCase):
             self.assertIn("needs_metadata_review", columns)
             self.assertIn("metadata_review_reason", columns)
             self.assertIn("metadata_review_score", columns)
+            self.assertIn("analysis_energy", columns)
+            self.assertIn("analysis_noisiness", columns)
+            self.assertIn("analysis_genre_tag", columns)
 
 
     def test_schema_v2_is_migrated_to_embedded_artwork_columns(self) -> None:
@@ -446,7 +505,7 @@ class LibraryDatabaseMigrationTests(unittest.TestCase):
                     for row in conn.execute("PRAGMA table_info(tracks)").fetchall()
                 }
 
-            self.assertEqual(8, version)
+            self.assertEqual(9, version)
             self.assertIn("embedded_artwork_path", columns)
             self.assertIn("embedded_artwork_checked", columns)
             self.assertIn("waveform_peaks", columns)
@@ -471,7 +530,7 @@ class LibraryDatabaseMigrationTests(unittest.TestCase):
                     for row in conn.execute("PRAGMA table_info(tracks)").fetchall()
                 }
 
-            self.assertEqual(8, version)
+            self.assertEqual(9, version)
             self.assertIn("waveform_peaks", columns)
             self.assertIn("waveform_analyzed_at", columns)
             self.assertIn("needs_metadata_review", columns)
@@ -498,11 +557,34 @@ class LibraryDatabaseMigrationTests(unittest.TestCase):
                     "AND name='track_beat_grid_anchors'"
                 ).fetchone()
 
-            self.assertEqual(8, version)
+            self.assertEqual(9, version)
             self.assertIn("beat_grid_json", columns)
             self.assertIn("beat_grid_analyzed_at", columns)
             self.assertIn("needs_metadata_review", columns)
             self.assertIsNotNone(anchor_table)
+
+    def test_schema_v8_is_migrated_to_energy_columns(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "library.sqlite3"
+            with closing(sqlite3.connect(path)) as conn:
+                conn.execute("CREATE TABLE tracks (id INTEGER PRIMARY KEY)")
+                conn.execute("PRAGMA user_version=8")
+                conn.commit()
+
+            database = LibraryDatabase(path)
+            database.initialize()
+
+            with database.connection() as conn:
+                version = conn.execute("PRAGMA user_version").fetchone()[0]
+                columns = {
+                    row["name"]
+                    for row in conn.execute("PRAGMA table_info(tracks)").fetchall()
+                }
+
+            self.assertEqual(9, version)
+            self.assertIn("analysis_energy", columns)
+            self.assertIn("analysis_noisiness", columns)
+            self.assertIn("analysis_genre_tag", columns)
 
 
 if __name__ == "__main__":

@@ -9,6 +9,7 @@ LIBRARY_SORT_LABELS = {
     "artist": "Исполнитель / название",
     "title": "Название",
     "bpm": "BPM",
+    "energy": "Энергия",
     "camelot": "Тональность Camelot",
     "added": "Дата добавления",
     "year": "Год выпуска",

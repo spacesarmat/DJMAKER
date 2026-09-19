@@ -372,7 +372,12 @@ class TaskProgressController:
 
             def analyze_one(track_id: int) -> TrackRecord:
                 task.checkpoint()
-                return app.service.analyze_track(track_id, task=task)
+                return app.service.analyze_track(
+                    track_id,
+                    task=task,
+                    genre_refinement_enabled=app.settings.energy_genre_refinement_enabled,
+                    genre_gpu_enabled=app.settings.energy_genre_gpu_enabled,
+                )
 
             async for outcome in app.workers.run_many_unordered(
                 analyze_one,

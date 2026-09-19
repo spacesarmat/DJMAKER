@@ -31,7 +31,7 @@ from djmaker.infrastructure.playlists import create_playlist_schema
 from djmaker.infrastructure.set_timeline import create_set_timeline_schema
 
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 
 class DatabaseError(RuntimeError):
@@ -87,6 +87,9 @@ class LibraryDatabase:
                     if version == 7:
                         self._migrate_v7_to_v8(conn)
                         version = 8
+                    if version == 8:
+                        self._migrate_v8_to_v9(conn)
+                        version = 9
                     conn.execute(f"PRAGMA user_version={version}")
                     conn.commit()
         except sqlite3.Error as exc:
@@ -162,6 +165,9 @@ class LibraryDatabase:
                 analysis_scale TEXT NOT NULL DEFAULT '',
                 analysis_key_strength REAL,
                 analysis_camelot TEXT NOT NULL DEFAULT '',
+                analysis_energy REAL,
+                analysis_noisiness REAL,
+                analysis_genre_tag TEXT NOT NULL DEFAULT '',
                 analyzed_at TEXT,
                 artwork_url TEXT,
                 embedded_artwork_path TEXT,
@@ -265,6 +271,23 @@ class LibraryDatabase:
             )
         if "metadata_review_score" not in columns:
             conn.execute("ALTER TABLE tracks ADD COLUMN metadata_review_score REAL")
+
+    @staticmethod
+    def _migrate_v8_to_v9(conn: sqlite3.Connection) -> None:
+        """Добавляет энергию (AIR) и жанровый бакет цвета к DSP-анализу."""
+        if not conn.in_transaction:
+            conn.execute("BEGIN IMMEDIATE")
+        columns = {
+            str(row[1]) for row in conn.execute("PRAGMA table_info(tracks)").fetchall()
+        }
+        if "analysis_energy" not in columns:
+            conn.execute("ALTER TABLE tracks ADD COLUMN analysis_energy REAL")
+        if "analysis_noisiness" not in columns:
+            conn.execute("ALTER TABLE tracks ADD COLUMN analysis_noisiness REAL")
+        if "analysis_genre_tag" not in columns:
+            conn.execute(
+                "ALTER TABLE tracks ADD COLUMN analysis_genre_tag TEXT NOT NULL DEFAULT ''"
+            )
 
     @staticmethod
     def _now() -> str:
@@ -440,6 +463,16 @@ class LibraryDatabase:
                         analysis_camelot=CASE
                             WHEN tracks.file_hash=excluded.file_hash THEN tracks.analysis_camelot
                             ELSE '' END,
+                        analysis_energy=CASE
+                            WHEN tracks.file_hash=excluded.file_hash THEN tracks.analysis_energy
+                            ELSE NULL END,
+                        analysis_noisiness=CASE
+                            WHEN tracks.file_hash=excluded.file_hash THEN tracks.analysis_noisiness
+                            ELSE NULL END,
+                        analysis_genre_tag=CASE
+                            WHEN tracks.file_hash=excluded.file_hash
+                            THEN tracks.analysis_genre_tag
+                            ELSE '' END,
                         analyzed_at=CASE
                             WHEN tracks.file_hash=excluded.file_hash THEN tracks.analyzed_at
                             ELSE NULL END,
@@ -516,6 +549,7 @@ class LibraryDatabase:
             "artist": "NULLIF(TRIM(artist), '') COLLATE DJMAKER_TEXT",
             "title": "NULLIF(TRIM(title), '') COLLATE DJMAKER_TEXT",
             "bpm": "COALESCE(positive_number(analysis_bpm), positive_number(bpm))",
+            "energy": "positive_number(analysis_energy)",
             "camelot": (
                 "COALESCE(camelot_order(analysis_camelot), "
                 "camelot_order(NULLIF(TRIM(analysis_key || ' ' || analysis_scale), '')), "
@@ -759,7 +793,8 @@ class LibraryDatabase:
                     UPDATE tracks SET
                         analysis_bpm=?, analysis_bpm_confidence=?,
                         analysis_key=?, analysis_scale=?, analysis_key_strength=?,
-                        analysis_camelot=?, analyzed_at=?,
+                        analysis_camelot=?, analysis_energy=?, analysis_noisiness=?,
+                        analysis_genre_tag=?, analyzed_at=?,
                         beat_grid_json=?, beat_grid_analyzed_at=?, updated_at=?
                     WHERE id=?
                     """,
@@ -770,6 +805,9 @@ class LibraryDatabase:
                         analysis.scale,
                         analysis.key_strength,
                         analysis.camelot,
+                        analysis.energy,
+                        analysis.noisiness,
+                        analysis.genre_tag,
                         analyzed_at,
                         grid_payload,
                         grid_analyzed_at,
@@ -1020,6 +1058,9 @@ class LibraryDatabase:
                     scale=str(row["analysis_scale"] or ""),
                     key_strength=row["analysis_key_strength"],
                     camelot=str(row["analysis_camelot"] or ""),
+                    energy=row["analysis_energy"],
+                    noisiness=row["analysis_noisiness"],
+                    genre_tag=str(row["analysis_genre_tag"] or ""),
                     analyzed_at=str(row["analyzed_at"] or ""),
                     beat_grid=_beat_grid_from_row(row),
                 )
