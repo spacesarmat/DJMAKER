@@ -85,6 +85,7 @@ class GenreClassifier:
         self._session_attempted = False
 
     def available(self) -> bool:
+        """Быстрая проверка без сети: модель уже скачана и цела на диске."""
         return self.runtime.ast_model_path() is not None
 
     def classify(self, waveform: np.ndarray, sample_rate: int) -> str:
@@ -132,6 +133,13 @@ class GenreClassifier:
             return None
         self._session_attempted = True
 
+        # Скачивает модель при первом реальном использовании (не при probe/
+        # available()) — ensure_ast_model() сам не трогает сеть, если модель
+        # уже на диске, и никогда не бросает исключение при сбое загрузки.
+        status = self.runtime.ensure_ast_model()
+        if not status.available:
+            LOGGER.warning("AST-модель недоступна: %s", status.detail)
+            return None
         model_path = self.runtime.ast_model_path()
         if model_path is None:
             return None

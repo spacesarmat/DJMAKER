@@ -261,11 +261,15 @@ class GenreClassificationWiringTests(unittest.TestCase):
         saved_analysis = service.database.save_audio_analysis.call_args.args[1]
         self.assertEqual("heavy_dark", saved_analysis.genre_tag)
 
-    def test_classifier_skips_inference_when_model_not_available(self) -> None:
+    def test_classify_is_called_even_when_model_not_yet_downloaded(self) -> None:
+        """classify() сам инициирует ленивую загрузку модели — analyze_track
+        больше не должен пропускать вызов из-за предварительной проверки
+        available() (иначе загрузка никогда бы не запускалась)."""
         service, _track = self._service()
         fake_samples = np.zeros(1000, dtype=np.float32)
         fake_classifier = Mock()
         fake_classifier.available.return_value = False
+        fake_classifier.classify.return_value = ""
         fake_classifier.gpu_enabled = True
 
         with (
@@ -274,7 +278,7 @@ class GenreClassificationWiringTests(unittest.TestCase):
         ):
             service.analyze_track(3, genre_refinement_enabled=True)
 
-        fake_classifier.classify.assert_not_called()
+        fake_classifier.classify.assert_called_once()
 
     def test_genre_classifier_instance_is_reused_across_calls_with_same_gpu_setting(self) -> None:
         service, _track = self._service()

@@ -6,6 +6,7 @@ from unittest.mock import Mock, patch
 
 import numpy as np
 
+from djmaker.runtime.dependencies import DependencyStatus
 from djmaker.services.ast_preprocessing import AST_WINDOW_SAMPLES
 from djmaker.services.genre_inference import (
     AMBIENT_LABEL_INDICES,
@@ -100,19 +101,47 @@ class SelectOnnxProvidersTests(unittest.TestCase):
         )
 
 
+def _runtime_with_model(path: Path | None) -> Mock:
+    """Мок RuntimeDependencies: ensure_ast_model() скачивает (или сообщает
+    об ошибке), ast_model_path() отражает результат — как в реальном классе."""
+    runtime = Mock()
+    if path is None:
+        status = DependencyStatus(name="AST", available=False, managed=True, detail="нет сети")
+    else:
+        status = DependencyStatus(name="AST", available=True, managed=True, path=str(path))
+    runtime.ensure_ast_model = Mock(return_value=status)
+    runtime.ast_model_path = Mock(return_value=path)
+    return runtime
+
+
 class GenreClassifierTests(unittest.TestCase):
-    def test_returns_empty_when_model_not_available(self) -> None:
-        runtime = Mock()
-        runtime.ast_model_path = Mock(return_value=None)
+    def test_returns_empty_when_model_cannot_be_downloaded(self) -> None:
+        runtime = _runtime_with_model(None)
         classifier = GenreClassifier(runtime, gpu_enabled=False)
 
         result = classifier.classify(np.zeros(AST_WINDOW_SAMPLES, dtype=np.float32), sample_rate=44100)
 
         self.assertEqual("", result)
+        runtime.ensure_ast_model.assert_called_once()
+
+    def test_first_classify_call_triggers_lazy_model_download(self) -> None:
+        """classify() — не available() — единственная точка, скачивающая модель."""
+        runtime = _runtime_with_model(Path("/fake/model.onnx"))
+        classifier = GenreClassifier(runtime, gpu_enabled=False)
+        fake_session = Mock()
+        fake_session.run = Mock(return_value=[np.zeros((1, 527), dtype=np.float32)])
+
+        runtime.ensure_ast_model.assert_not_called()
+        with patch(
+            "djmaker.services.genre_inference._create_onnx_session",
+            return_value=fake_session,
+        ):
+            classifier.classify(np.zeros(AST_WINDOW_SAMPLES, dtype=np.float32), sample_rate=16000)
+
+        runtime.ensure_ast_model.assert_called_once()
 
     def test_returns_empty_on_session_creation_failure(self) -> None:
-        runtime = Mock()
-        runtime.ast_model_path = Mock(return_value=Path("/fake/model.onnx"))
+        runtime = _runtime_with_model(Path("/fake/model.onnx"))
         classifier = GenreClassifier(runtime, gpu_enabled=False)
 
         with patch(
@@ -125,9 +154,8 @@ class GenreClassifierTests(unittest.TestCase):
 
         self.assertEqual("", result)
 
-    def test_session_is_created_only_once_across_calls(self) -> None:
-        runtime = Mock()
-        runtime.ast_model_path = Mock(return_value=Path("/fake/model.onnx"))
+    def test_session_and_download_happen_only_once_across_calls(self) -> None:
+        runtime = _runtime_with_model(Path("/fake/model.onnx"))
         classifier = GenreClassifier(runtime, gpu_enabled=False)
 
         fake_session = Mock()
@@ -142,10 +170,10 @@ class GenreClassifierTests(unittest.TestCase):
             classifier.classify(waveform, sample_rate=16000)
 
         create.assert_called_once()
+        runtime.ensure_ast_model.assert_called_once()
 
     def test_classify_aggregates_windows_and_calls_decide_genre_tag(self) -> None:
-        runtime = Mock()
-        runtime.ast_model_path = Mock(return_value=Path("/fake/model.onnx"))
+        runtime = _runtime_with_model(Path("/fake/model.onnx"))
         classifier = GenreClassifier(runtime, gpu_enabled=False)
 
         heavy_index = next(iter(HEAVY_DARK_LABEL_INDICES))
@@ -164,11 +192,11 @@ class GenreClassifierTests(unittest.TestCase):
         self.assertEqual(GENRE_TAG_HEAVY_DARK, result)
         self.assertGreaterEqual(fake_session.run.call_count, 1)
 
-    def test_available_reflects_runtime_model_presence(self) -> None:
-        runtime = Mock()
-        runtime.ast_model_path = Mock(return_value=None)
+    def test_available_reflects_runtime_model_presence_without_downloading(self) -> None:
+        runtime = _runtime_with_model(None)
         classifier = GenreClassifier(runtime, gpu_enabled=False)
         self.assertFalse(classifier.available())
+        runtime.ensure_ast_model.assert_not_called()
 
         runtime.ast_model_path = Mock(return_value=Path("/fake/model.onnx"))
         self.assertTrue(classifier.available())

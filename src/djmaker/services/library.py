@@ -216,8 +216,7 @@ class LibraryService:
             analysis.noisiness = features.spectral_flatness
             if genre_refinement_enabled:
                 classifier = self._get_genre_classifier(genre_gpu_enabled)
-                if classifier.available():
-                    analysis.genre_tag = classifier.classify(samples, sample_rate=ANALYSIS_SAMPLE_RATE)
+                analysis.genre_tag = classifier.classify(samples, sample_rate=ANALYSIS_SAMPLE_RATE)
         except (AudioAnalysisError, OSError) as exc:
             LOGGER.warning("Не удалось посчитать энергию для %s: %s", track.path, exc)
 
