@@ -337,6 +337,40 @@ class GenreClassificationWiringTests(unittest.TestCase):
         self.assertEqual("", saved_analysis.genre_tag)
         self.assertIsNotNone(result)
 
+    def test_unexpected_energy_error_does_not_discard_bpm_and_key(self) -> None:
+        """Регрессия: в упакованном приложении numba (зависимость librosa) падает
+        RuntimeError «cannot cache function ... no locator available», а не
+        OSError/AudioAnalysisError. Побочная (опциональная) энергия не должна
+        стирать уже посчитанные BPM/Key — иначе не сохраняется вообще ничего."""
+        errors = (
+            RuntimeError("cannot cache function '__o_fold': no locator available"),
+            ImportError("No module named 'librosa'"),
+        )
+        for error in errors:
+            with self.subTest(error=type(error).__name__):
+                service, _track = self._service()
+                fake_samples = np.zeros(1000, dtype=np.float32)
+
+                with (
+                    patch(
+                        "djmaker.services.library.decode_mono_pcm",
+                        return_value=fake_samples,
+                    ),
+                    patch(
+                        "djmaker.services.library.compute_energy_features",
+                        side_effect=error,
+                    ),
+                ):
+                    result = service.analyze_track(3, genre_refinement_enabled=False)
+
+                service.tags.write_analysis.assert_called_once()
+                service.database.save_audio_analysis.assert_called_once()
+                saved_analysis = service.database.save_audio_analysis.call_args.args[1]
+                self.assertEqual(120.0, saved_analysis.bpm)
+                self.assertEqual("A", saved_analysis.musical_key)
+                self.assertIsNone(saved_analysis.energy)
+                self.assertIsNotNone(result)
+
 
 if __name__ == "__main__":
     unittest.main()

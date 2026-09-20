@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "djmaker"
-version = "0.1.1"
+version = "0.1.2"
 description = "Кроссплатформенный менеджер музыкальной библиотеки для Windows и macOS"
 readme = "README.md"
 requires-python = ">=3.14"
@@ -37,6 +37,13 @@ path = "src"
 module = "main.py"
 [tool.flet.flutter.pubspec.dependency_overrides]
 flet = "0.86.5"
+
+# librosa тянет numba с @jit(cache=True) — ему нужен реальный .py рядом с модулем.
+# По умолчанию serious_python компилирует пакеты в .pyc и удаляет исходники, из-за
+# чего librosa падает на первом вызове («cannot cache function ... no locator
+# available»), и в упакованном приложении не считаются BPM, Key и энергия.
+[tool.flet.compile]
+packages = false
 
 [tool.flet.boot_screen.flet]
 theme_mode = "auto"

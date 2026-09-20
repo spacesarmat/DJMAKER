@@ -32,7 +32,7 @@ from djmaker.services.energy_analysis import compute_energy_features, decode_mon
 from djmaker.services.genre_inference import GenreClassifier
 from djmaker.services.organizer import FileOrganizer
 from djmaker.services.scanner import LibraryScanner
-from djmaker.services.tasks import TaskControl
+from djmaker.services.tasks import TaskControl, TaskInterrupted
 from djmaker.services.waveform import WAVEFORM_BAR_COUNT, WaveformAnalyzer
 
 
@@ -217,8 +217,14 @@ class LibraryService:
             if genre_refinement_enabled:
                 classifier = self._get_genre_classifier(genre_gpu_enabled)
                 analysis.genre_tag = classifier.classify(samples, sample_rate=ANALYSIS_SAMPLE_RATE)
+        except TaskInterrupted:
+            raise
         except (AudioAnalysisError, OSError) as exc:
             LOGGER.warning("Не удалось посчитать энергию для %s: %s", track.path, exc)
+        except Exception:
+            # Энергия и жанр — побочные признаки: неожиданный сбой Librosa/numba/ONNX
+            # не должен стирать уже посчитанные BPM/Key, которые сохраняются ниже.
+            LOGGER.exception("Неожиданная ошибка анализа энергии для %s", track.path)
 
         # После этой контрольной точки запись тегов и синхронизация БД выполняются
         # как единый участок: пауза не должна оставить уже изменённый файл со
