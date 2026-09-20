@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "djmaker"
-version = "0.1.2"
+version = "0.1.3"
 description = "Кроссплатформенный менеджер музыкальной библиотеки для Windows и macOS"
 readme = "README.md"
 requires-python = ">=3.14"
@@ -38,11 +38,19 @@ module = "main.py"
 [tool.flet.flutter.pubspec.dependency_overrides]
 flet = "0.86.5"
 
-# librosa тянет numba с @jit(cache=True) — ему нужен реальный .py рядом с модулем.
-# По умолчанию serious_python компилирует пакеты в .pyc и удаляет исходники, из-за
-# чего librosa падает на первом вызове («cannot cache function ... no locator
-# available»), и в упакованном приложении не считаются BPM, Key и энергия.
+# Энергия трека считается через librosa, а он не работает в бандле serious_python
+# с настройками по умолчанию — нужны ОБА следующих параметра:
+#
+# 1) compile.packages: numba (зависимость librosa) использует @jit(cache=True) и
+#    требует реальный .py рядом с модулем. По умолчанию пакеты компилируются в .pyc,
+#    а исходники удаляются -> «cannot cache function ... no locator available».
+# 2) cleanup.packages: чистка удаляет все *.pyi, а librosa читает __init__.pyi при
+#    импорте (lazy_loader.attach_stub) -> «Cannot load imports from non-existent
+#    stub ...__init__.pyi».
 [tool.flet.compile]
+packages = false
+
+[tool.flet.cleanup]
 packages = false
 
 [tool.flet.boot_screen.flet]
